@@ -114,8 +114,18 @@ class Config:
     max_trades_per_session: int = 2
 
     # Clock policy, all wall-clock America/New_York.
+    #
+    # Topstep requires every position closed by 16:10 ET (15:10 CT), and their
+    # risk managers BEGIN FLATTENING at 16:08 ET. Flattening at their deadline
+    # is already too late, so we flatten at 15:55 -- 13 minutes before their
+    # desk acts, leaving room for a slow fill or a reconnect.
+    #
+    # With entry_lockout_minutes = 10, 15:55 also puts the last possible entry
+    # at 15:45 ET. entry_cutoff_et (11:30) is the strategy's own, stricter
+    # cutoff and binds first in normal operation; the lockout is the backstop
+    # that survives anyone relaxing it.
     session_boundary_et: time = time(18, 0)
-    hard_flatten_et: time = time(16, 30)
+    hard_flatten_et: time = time(15, 55)
     entry_cutoff_et: time = time(11, 30)
     rth_open_et: time = time(9, 30)
     entry_lockout_minutes: int = 10
@@ -279,7 +289,7 @@ def _session_clock_time(now: datetime, at: time, config: Config) -> datetime:
     """Resolve a wall-clock ET time within the session that contains ``now``.
 
     A session opens at 18:00 ET on day D and runs to 18:00 ET on day D+1, so
-    every intraday time (09:30, 11:30, 16:30) falls on D+1.
+    every intraday time (09:30, 11:30, 15:55) falls on D+1.
     """
     session_start = session_start_for(now, config)
     target_date = session_start.date() + timedelta(days=1)
@@ -287,7 +297,7 @@ def _session_clock_time(now: datetime, at: time, config: Config) -> datetime:
 
 
 def hard_flatten_at(now: datetime, config: Config | None = None) -> datetime:
-    """The 16:30 ET hard flatten for the session containing ``now``."""
+    """The 15:55 ET hard flatten for the session containing ``now``."""
     cfg = config or Config()
     return _session_clock_time(now, cfg.hard_flatten_et, cfg)
 

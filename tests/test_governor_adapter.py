@@ -16,6 +16,7 @@ from project_x_py.models import Account, Instrument, Position
 
 from governor_adapter import (
     KILL_FILE_NAME,
+    MNQ_POINT_VALUE,
     SnapshotUnavailable,
     build_snapshot,
     kill_switch_present,
@@ -71,6 +72,69 @@ def test_point_value_for_mnq_is_two_dollars():
     """Position.unrealized_pnl defaults tick_value to 1.0, which would halve
     every MNQ P&L figure. The adapter must always pass 2.0."""
     assert point_value(MNQ) == 2.0
+    assert MNQ_POINT_VALUE == 2.00
+    assert point_value(MNQ) == MNQ_POINT_VALUE, "constant and derivation must agree"
+
+
+def test_two_mnq_down_ten_points_is_a_forty_dollar_loss():
+    """The exact figure the tick_value default would get wrong.
+
+    2 MNQ x 10 points x $2.00 = -$40.00. With the SDK's default tick_value of
+    1.0 this reads as -$20.00, so a real $40 loss would look like $20 and the
+    loss trip-wire would let the position run to twice the intended drawdown.
+    """
+    v = asyncio.run(value_positions([long_mnq(size=2, avg=20_000.0)],
+                                    FakePrice(19_990.0), MNQ))
+    assert v.unrealised_pnl == pytest.approx(-40.00)
+    assert v.unrealised_pnl != pytest.approx(-20.00), "tick_value default leaked in"
+
+
+def test_the_default_tick_value_would_halve_the_loss():
+    """Pins the trap itself, so the reason for the constant stays visible."""
+    position = long_mnq(size=2, avg=20_000.0)
+    assert position.unrealized_pnl(19_990.0) == pytest.approx(-20.00)  # default 1.0
+    assert position.unrealized_pnl(19_990.0, MNQ_POINT_VALUE) == pytest.approx(-40.00)
+
+
+def test_point_value_rejects_mnq_geometry_that_does_not_match_the_constant():
+    """If the gateway ever reports different MNQ geometry, refuse to value."""
+    altered = Instrument(
+        id=MNQ.id, name="MNQ", description="", tickSize=0.25, tickValue=1.00,
+        activeContract=True,
+    )
+    with pytest.raises(SnapshotUnavailable, match="point value"):
+        point_value(altered)
+
+
+def test_no_call_site_omits_the_tick_value():
+    """Structural guard: every unrealized_pnl call must pass the point value.
+
+    A source scan rather than a behavioural test, because the failure mode is
+    someone adding a new call site that silently takes the 1.0 default. Reading
+    right and being wrong is exactly what this catches.
+    """
+    import ast
+    import pathlib
+
+    src = pathlib.Path(__file__).parent.parent / "src"
+    call_sites = 0
+    for path in sorted(src.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "unrealized_pnl"):
+                continue
+            call_sites += 1
+            passes_value = len(node.args) >= 2 or any(
+                kw.arg == "tick_value" for kw in node.keywords
+            )
+            assert passes_value, (
+                f"{path.name}:{node.lineno} calls unrealized_pnl without an "
+                "explicit tick value; it would default to 1.0 and halve the P&L"
+            )
+    assert call_sites >= 1, "expected at least one call site to guard"
 
 
 def test_point_value_rejects_unusable_tick_geometry():
@@ -219,6 +283,35 @@ def test_governor_module_imports_no_sdk():
         assert forbidden not in source, f"governor.py must not import {forbidden}"
     for forbidden in ("datetime.now(", "time.time(", ".utcnow("):
         assert forbidden not in source, f"governor.py must not read the clock: {forbidden}"
+
+
+def test_connection_test_never_imports_an_order_capable_object():
+    """Gate 1 must be structurally incapable of transmitting an order.
+
+    It is safe only because it is built on ProjectX, whose public surface has
+    no place/submit/modify/cancel method. Importing TradingSuite or any order
+    manager would silently reintroduce that capability.
+    """
+    import ast
+    import pathlib
+
+    path = pathlib.Path(__file__).parent.parent / "src" / "connection_test.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            imported += [f"{node.module}.{a.name}" for a in node.names]
+        elif isinstance(node, ast.Import):
+            imported += [a.name for a in node.names]
+
+    forbidden = ("TradingSuite", "OrderManager", "order_manager", "managed_trade",
+                 "OrderChain", "order_chain")
+    for name in imported:
+        for bad in forbidden:
+            assert bad not in name, f"connection_test.py imports {name!r}"
+
+    assert any("ProjectX" in n for n in imported), "expected the read-only client"
 
 
 def test_no_order_transmission_path_exists_yet():

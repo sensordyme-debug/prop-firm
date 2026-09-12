@@ -210,28 +210,73 @@ def test_daily_max_loss_does_not_fire_one_cent_inside():
 # ---------------------------------------------------------------------------
 
 
-def test_hard_flatten_fires_exactly_at_1630_et():
-    d = decide(snap(now=datetime(2026, 9, 16, 16, 30, 0, tzinfo=ET)))
+def test_hard_flatten_fires_exactly_at_1555_et():
+    """Topstep flattens from 16:08 and requires flat by 16:10; we act 15:55."""
+    d = decide(snap(now=datetime(2026, 9, 16, 15, 55, 0, tzinfo=ET)))
     assert d.action is Action.FLATTEN_AND_HALT
     assert d.code == Reason.HARD_FLATTEN_TIME
-    assert "16:30" in d.reason
+    assert "15:55" in d.reason
 
 
 def test_hard_flatten_does_not_fire_one_second_before():
-    d = decide(snap(now=datetime(2026, 9, 16, 16, 29, 59, tzinfo=ET)))
+    d = decide(snap(now=datetime(2026, 9, 16, 15, 54, 59, tzinfo=ET)))
     assert d.action is not Action.FLATTEN_AND_HALT
+
+
+def test_flatten_lands_safely_before_topstep_acts():
+    """The firm requires flat by 16:10 ET and starts flattening at 16:08 ET.
+
+    Pinning the relationship in a test means a future edit to hard_flatten_et
+    cannot quietly drift past the point where Topstep's desk intervenes.
+    """
+    c = cfg()
+    assert c.hard_flatten_et == time(15, 55)
+    topstep_starts_flattening = time(16, 8)
+    firm_deadline = time(16, 10)
+    assert c.hard_flatten_et < topstep_starts_flattening < firm_deadline
+
+    margin = datetime.combine(WED_1000.date(), topstep_starts_flattening) - datetime.combine(
+        WED_1000.date(), c.hard_flatten_et
+    )
+    assert margin == timedelta(minutes=13)
+
+
+def test_last_possible_entry_is_1545_et():
+    """15:55 flatten minus the 10-minute lockout puts the final entry at 15:45.
+
+    Checked with the strategy's own 11:30 cutoff lifted, so this exercises the
+    governor's backstop rather than the stricter rule that normally binds.
+    """
+    assert LATE_CUTOFF.hard_flatten_et == time(15, 55)
+    at_1545 = decide(snap(now=datetime(2026, 9, 16, 15, 45, 0, tzinfo=ET)), config=LATE_CUTOFF)
+    assert at_1545.action is Action.CONTINUE
+
+    after = decide(snap(now=datetime(2026, 9, 16, 15, 45, 1, tzinfo=ET)), config=LATE_CUTOFF)
+    assert after.action is Action.REFUSE_ENTRY
+    assert after.code == Reason.NEAR_HARD_FLATTEN
+
+
+def test_no_entry_survives_into_topsteps_flattening_window():
+    """Nothing may be opened at or after 16:08 ET under any configuration."""
+    for cutoff in (time(11, 30), time(17, 0)):
+        d = decide(
+            snap(now=datetime(2026, 9, 16, 16, 8, 0, tzinfo=ET)),
+            config=cfg(entry_cutoff_et=cutoff),
+        )
+        assert d.action is Action.FLATTEN_AND_HALT
+        assert d.code == Reason.HARD_FLATTEN_TIME
 
 
 def test_hard_flatten_fires_for_an_evening_timestamp_past_the_cutoff():
     """17:00 ET belongs to the session that opened at 18:00 the previous day,
-    whose 16:30 flatten has already passed."""
+    whose 15:55 flatten has already passed."""
     d = decide(snap(now=datetime(2026, 9, 16, 17, 0, tzinfo=ET)))
     assert d.action is Action.FLATTEN_AND_HALT
     assert d.code == Reason.HARD_FLATTEN_TIME
 
 
 def test_hard_flatten_does_not_fire_just_after_the_session_reopens():
-    """18:30 opens a NEW session; its 16:30 is tomorrow, so no halt."""
+    """18:30 opens a NEW session; its 15:55 is tomorrow, so no halt."""
     d = decide(snap(now=datetime(2026, 9, 16, 18, 30, tzinfo=ET)))
     assert d.action is not Action.FLATTEN_AND_HALT
 
@@ -263,7 +308,7 @@ def test_every_tripwire_has_a_distinct_reason_code():
     codes = {
         decide(snap(net_liq=START_BALANCE, mll_floor=49_600.0)).code,
         decide(snap(net_liq=49_750.0)).code,
-        decide(snap(now=datetime(2026, 9, 16, 16, 30, tzinfo=ET))).code,
+        decide(snap(now=datetime(2026, 9, 16, 15, 55, tzinfo=ET))).code,
         decide(snap(net_liq=50_500.0)).code,
     }
     assert codes == {
@@ -365,19 +410,20 @@ def test_matching_anchors_within_rounding_tolerance_are_accepted():
 
 # -- 10-minute lockout before the hard flatten ------------------------------
 # The 11:30 cutoff would mask this window, so these two use a later cutoff.
+# With the flatten at 15:55, the lockout puts the last entry at 15:45:00.
 
 LATE_CUTOFF = cfg(entry_cutoff_et=time(17, 0))
 
 
 def test_refuses_inside_the_ten_minute_lockout():
-    d = decide(snap(now=datetime(2026, 9, 16, 16, 20, 1, tzinfo=ET)), config=LATE_CUTOFF)
+    d = decide(snap(now=datetime(2026, 9, 16, 15, 45, 1, tzinfo=ET)), config=LATE_CUTOFF)
     assert d.action is Action.REFUSE_ENTRY
     assert d.code == Reason.NEAR_HARD_FLATTEN
 
 
 def test_allows_entry_with_exactly_ten_minutes_remaining():
     """'Fewer than 10 minutes' -- at exactly 10:00 remaining, entry stands."""
-    d = decide(snap(now=datetime(2026, 9, 16, 16, 20, 0, tzinfo=ET)), config=LATE_CUTOFF)
+    d = decide(snap(now=datetime(2026, 9, 16, 15, 45, 0, tzinfo=ET)), config=LATE_CUTOFF)
     assert d.action is Action.CONTINUE
 
 
@@ -437,7 +483,7 @@ def test_every_refusal_has_a_distinct_reason_code():
         decide(st=state(reconciled=False)).code,
         decide(snap(open_position_size=2)).code,
         decide(st=state(trades_today=2)).code,
-        decide(snap(now=datetime(2026, 9, 16, 16, 20, 1, tzinfo=ET)), config=LATE_CUTOFF).code,
+        decide(snap(now=datetime(2026, 9, 16, 15, 45, 1, tzinfo=ET)), config=LATE_CUTOFF).code,
         decide(snap(now=datetime(2026, 9, 16, 12, 0, tzinfo=ET))).code,
         decide(snap(now=datetime(2026, 9, 16, 9, 0, tzinfo=ET))).code,
         decide(snap(session_start_balance=49_000.0)).code,
@@ -617,16 +663,16 @@ def test_session_start_on_the_evening_of_a_dst_change_day():
 # -- derived session clock times --------------------------------------------
 
 
-def test_hard_flatten_is_the_1630_inside_the_current_session():
+def test_hard_flatten_is_the_1555_inside_the_current_session():
     assert hard_flatten_at(datetime(2026, 9, 16, 10, 0, tzinfo=ET)) == datetime(
-        2026, 9, 16, 16, 30, tzinfo=ET
+        2026, 9, 16, 15, 55, tzinfo=ET
     )
 
 
 def test_hard_flatten_for_an_evening_timestamp_is_the_next_day():
-    """19:00 Wed opens Thursday's session, so the flatten is Thu 16:30."""
+    """19:00 Wed opens Thursday's session, so the flatten is Thu 15:55."""
     assert hard_flatten_at(datetime(2026, 9, 16, 19, 0, tzinfo=ET)) == datetime(
-        2026, 9, 17, 16, 30, tzinfo=ET
+        2026, 9, 17, 15, 55, tzinfo=ET
     )
 
 
@@ -637,10 +683,10 @@ def test_entry_cutoff_and_rth_open_follow_the_same_session():
 
 
 def test_session_clock_times_survive_the_spring_forward():
-    """Session opened Sat 18:00 EST; its 16:30 is Sunday, in EDT."""
+    """Session opened Sat 18:00 EST; its 15:55 is Sunday, in EDT."""
     now = datetime(2026, 3, 8, 10, 0, tzinfo=ET)
     flatten = hard_flatten_at(now)
-    assert flatten == datetime(2026, 3, 8, 16, 30, tzinfo=ET)
+    assert flatten == datetime(2026, 3, 8, 15, 55, tzinfo=ET)
     assert flatten.utcoffset() == timedelta(hours=-4)
 
 
@@ -723,7 +769,7 @@ def test_config_defaults_match_the_documented_risk_envelope():
     assert c.max_trades_per_session == 2
     assert (c.session_boundary_et, c.hard_flatten_et, c.entry_cutoff_et) == (
         time(18, 0),
-        time(16, 30),
+        time(15, 55),
         time(11, 30),
     )
 

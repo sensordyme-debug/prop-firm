@@ -24,7 +24,8 @@ blown account.
 | Consistency target (Combine) | 55% | Best single day must stay within 55% of the $3,000 profit target. |
 | Profit target (Combine) | $3,000 | Pass condition. No minimum trading days. |
 | Max contracts | 5 mini / 50 micro | Micros count 10:1. |
-| Flat by | 15:10 CT / 16:10 ET | Positions must be closed. Day trading only, no overnight. |
+| Flat by (firm) | 15:10 CT / 16:10 ET | Positions must be closed. Day trading only, no overnight. Topstep risk managers **begin flattening at 16:08 ET** — their deadline is already too late to start acting. |
+| Flat by (ours) | **15:55 ET** | Our own hard flatten, 13 minutes before Topstep's desk intervenes. This is the value the governor enforces. |
 | HFT | Prohibited | No latency arbitrage, no sub-second churn. |
 | Hosting | Personal device only | **No VPS, no VPN, no remote server may transmit orders.** A server may log, backtest and serve read-only dashboards. |
 
@@ -49,11 +50,12 @@ blown account.
 Flatten and disable for the session on any of:
 - Daily profit target reached (+$500)
 - Daily loss reached (-$250) — far inside the firm's $1,000 DLL
-- Clock reaches 16:30 ET
+- Clock reaches **15:55 ET** (firm deadline is 16:10 ET; their risk
+  managers start flattening at 16:08 ET, so 15:55 leaves 13 minutes)
 - Net liquidation comes within $400 of the trailing MLL floor
 
 Refuse to open a new position when:
-- Fewer than 10 minutes remain before the hard flatten
+- Fewer than 10 minutes remain before the hard flatten (so: no new entry after 15:45 ET)
 - A position is already open
 - State is unreconciled after a reconnect
 - The kill switch file exists
@@ -103,6 +105,70 @@ Nowhere near binding for this strategy — but back off on HTTP 429 rather than 
 
 There is **no sandbox**. API orders hit the live account path. The Combine account
 is simulated, so it is the test environment.
+
+## Verified SDK behaviour
+
+Checked by introspecting the **installed** `project-x-py 4.3.0`, not by reading
+docs. The SDK notes above are accurate as far as they go; these are the things
+that are not written down and that will quietly produce wrong numbers.
+
+### 1. `Account` has no net-liquidation field
+
+The model returns exactly: `id`, `name`, `balance`, `canTrade`, `isVisible`,
+`simulated`. There is no net-liq field, and `Position` carries no unrealised
+P&L field either — only `size`, `type`, `averagePrice`, `contractId`.
+
+**Net liq must be derived: `balance + unrealised P&L`.**
+
+This matters because the obvious implementation is wrong in the worst way.
+Reading `balance` alone runs, returns a plausible number, and silently violates
+design constraint 3: `balance` does not move while a position is open, so a
+position running $1,500 against us reports zero session loss and the MLL guard
+never fires. The check that looks correct is the one that blows the account.
+
+Corollary: if the unrealised component cannot be computed — no current price,
+stale feed — net liq is **unknown**, and unknown must stop trading. It must
+never fall back to `balance`. `governor_adapter.value_positions` raises
+`SnapshotUnavailable` instead.
+
+### 2. `Position.unrealized_pnl` defaults to the wrong multiplier
+
+Signature: `unrealized_pnl(current_price: float, tick_value: float = 1.0)`.
+
+It multiplies a **point** difference by `tick_value`, and the default is `1.0`.
+For MNQ the correct figure is:
+
+    point value = tickValue / tickSize = 0.50 / 0.25 = $2.00 per index point
+
+So accepting the default reports **exactly half** of every move. A real $80
+stop-out reads as $40; the $250 session loss limit does not fire until the
+account is actually down $500; the $400 MLL buffer is really $800 of exposure.
+Every dollar figure in the system inherits this error, and nothing about the
+call site looks wrong.
+
+Defences, all three in place:
+- `governor_adapter.MNQ_POINT_VALUE = 2.00`, with the derivation in a comment.
+- `point_value()` derives it from the live contract and **refuses to value
+  positions** if an MNQ contract ever reports geometry that disagrees.
+- A test asserts 2 MNQ down 10 points is `-$40.00`, and an AST test fails the
+  build if any call site omits the argument.
+
+### 3. The trailing MLL floor is not exposed anywhere
+
+Searched the whole package. `Account` has no such field; `RiskConfig` and
+`stats_types.max_loss_limit` are **client-side settings we would be choosing
+ourselves**, not the firm's floor. Nothing in the gateway API reports it.
+
+The governor requires this value — it guards the only permanent-failure rule —
+so it has to come from outside the API:
+- read from the TopstepX dashboard and set as `MLL_FLOOR` in `.env`, or
+- tracked locally as *(highest end-of-day balance − $2,000)*, locking at
+  $50,000 once the account reaches $52,000.
+
+Reconcile the tracked value against the dashboard daily until they are proven
+to agree. `mll_floor_from_env()` raises rather than defaulting: a floor of zero
+would make the buffer check pass unconditionally and disable the guard in
+silence, which is worse than crashing.
 
 ## Build order — do not reorder
 

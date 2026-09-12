@@ -33,7 +33,8 @@ import os
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from math import isclose
+from typing import TYPE_CHECKING, Final, Protocol
 from zoneinfo import ZoneInfo
 
 from governor import ET, AccountSnapshot
@@ -42,6 +43,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from project_x_py.models import Account, Instrument, Position
 
 KILL_FILE_NAME = ".KILL"
+
+# MNQ contract geometry, verified against the installed SDK's Instrument model:
+#   tickSize  = 0.25 index points
+#   tickValue = $0.50 per tick
+#   point value = tickValue / tickSize = 0.50 / 0.25 = $2.00 per index point
+#
+# This constant exists because ``Position.unrealized_pnl(price, tick_value=1.0)``
+# multiplies a POINT difference by ``tick_value`` and defaults it to 1.0.
+# Accepting that default reports exactly HALF of every MNQ move -- a $80 loss
+# reads as $40, and the governor's loss trip-wire fires at twice the intended
+# drawdown, or not at all. Never call unrealized_pnl without passing this.
+MNQ_POINT_VALUE: Final[float] = 2.00
 
 
 class SnapshotUnavailable(RuntimeError):
@@ -101,7 +114,20 @@ def point_value(instrument: Instrument) -> float:
             f"instrument {instrument.name!r} has unusable tick geometry "
             f"(tickSize={tick_size}, tickValue={tick_value}); cannot value P&L"
         )
-    return tick_value / tick_size
+    derived = tick_value / tick_size
+
+    # Cross-check the live contract against the value we reasoned about. If the
+    # gateway ever reports different geometry for MNQ, every P&L figure and
+    # therefore every trip-wire is wrong, so fail loudly instead of trading on it.
+    if instrument.name.upper().startswith("MNQ") and not isclose(
+        derived, MNQ_POINT_VALUE, rel_tol=1e-9
+    ):
+        raise SnapshotUnavailable(
+            f"MNQ point value is {derived} but {MNQ_POINT_VALUE} was expected "
+            f"(tickSize={tick_size}, tickValue={tick_value}); contract geometry "
+            "changed, refusing to value positions until this is reviewed"
+        )
+    return derived
 
 
 # ---------------------------------------------------------------------------
