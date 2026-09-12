@@ -413,3 +413,27 @@ def test_bare_equality_would_confuse_the_two_halves_of_a_dst_fold():
     rolled = roll_session(snap(now=now), st, fold_cfg)
     assert rolled is not st, "an hour-apart anchor must roll, not be reused"
     assert rolled.trades_today == 0
+
+
+def test_a_daily_target_that_could_breach_combine_consistency_is_rejected():
+    """The failure mode risk checks are blind to: failing by WINNING.
+
+    A daily cap above 55% of the $3,000 profit target lets a single winning
+    session breach the Combine consistency rule. Nothing downward-looking
+    catches that, so it is enforced at config time.
+    """
+    with pytest.raises(ValueError, match="fail by winning"):
+        cfg(daily_profit_target=1_700.0)
+
+
+def test_the_consistency_ceiling_itself_is_allowed():
+    assert cfg(daily_profit_target=1_650.0).daily_profit_target == 1_650.0
+
+
+def test_the_default_daily_target_is_far_inside_the_ceiling():
+    assert cfg().daily_profit_target == 500.0
+
+
+def test_the_consistency_ceiling_guard_can_be_disabled():
+    assert cfg(daily_profit_target=2_000.0,
+               enforce_consistency_ceiling=False).daily_profit_target == 2_000.0

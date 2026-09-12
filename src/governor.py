@@ -71,6 +71,7 @@ from enum import Enum
 from typing import Final
 from zoneinfo import ZoneInfo
 
+from compliance import validate_daily_target
 from market_calendar import DayStatus, classify
 
 ET: Final[ZoneInfo] = ZoneInfo("America/New_York")
@@ -183,6 +184,7 @@ class Config:
     enforce_rth_open: bool = True
     enforce_anchor_consistency: bool = True
     enforce_market_calendar: bool = True
+    enforce_consistency_ceiling: bool = True
     anchor_tolerance: float = 0.01
 
     tz: ZoneInfo = field(default_factory=lambda: ET)
@@ -212,6 +214,14 @@ class Config:
                    "zero or positive")
         if self.anchor_tolerance < 0:
             reject("anchor_tolerance", self.anchor_tolerance, "zero or positive")
+
+        # The daily target and the Combine consistency rule are not independent
+        # settings, and nothing else ties them together. A daily cap above 55%
+        # of the profit target makes it possible to fail the Combine on a
+        # WINNING day -- the one failure mode no risk check will ever catch,
+        # because risk checks only look downward. See compliance.py.
+        if self.enforce_consistency_ceiling:
+            validate_daily_target(self.daily_profit_target)
 
     @classmethod
     def from_env(cls, **overrides: object) -> Config:

@@ -4,8 +4,11 @@ Stages are gated. **Do not start a stage until the previous gate is met.** The
 gates exist because each one is a documented way these accounts die.
 
 Current state: governor, market calendar, MLL tracker, connection test, the
-backtest harness and the data layer are built and unit-tested. No code has ever
-touched a live account, and no strategy exists yet.
+backtest harness, the data layer and the compliance tracker are built and
+unit-tested. No code has ever touched a live account, and no strategy exists yet.
+
+Firm rules were re-verified against Topstep's own help centre on 2026-09-12;
+FIRM_RULES.md records what was confirmed and what is still contested.
 
 ---
 
@@ -132,7 +135,12 @@ than backtest, the backtest was fiction — go back to Stage 4.
 
 ## Stage 7 — Pass the Combine
 
-$3,000 profit, best day ≤55% of target, MLL never touched. No minimum days.
+$3,000 profit, best day ≤55% of target, MLL never touched. No minimum days
+(two is the fewest the 55% rule allows).
+
+Track it with `compliance.combine_status(...)`, which reports progress and the
+consistency ratio together — the target alone does not tell you whether you
+have passed.
 
 Then choose a payout path. **Consistency** has both a higher cap ($6,000 vs
 $4,000) and fewer required days (3 vs 5); it only adds a 40% best-day rule, which
@@ -147,6 +155,15 @@ suits a strategy built around a steady daily target.
 Take it as soon as eligible even if small. Every payout resets the MLL to $0
 permanently — the floor locks at the starting balance and can never fall below it
 again. That structural change is worth more than the cash.
+
+`compliance.payout_status(...)` reports both paths and what each still needs.
+The number to watch is **2.5× your best day**: until total net profit reaches
+that, the Consistency path ($6,000 cap, 3 days) is shut regardless of how
+profitable you are. That is why the daily target is capped well below the
+Combine ceiling — a big day moves the finish line for every day after it.
+
+Also from here: an Express Funded account is closed after **30 days** without
+a trade, a Live Funded one after **90**. Set an alarm, do not rely on memory.
 
 **Gate:** payout received, MLL locked.
 

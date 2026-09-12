@@ -37,13 +37,19 @@ from datetime import date, timedelta
 from enum import Enum
 from typing import Final
 
-CALENDAR_VERIFIED: Final[bool] = False
+CALENDAR_VERIFIED: Final[bool] = False  # not checked against CME directly
+# The 2026 DATE LIST has been cross-checked against three independent
+# secondary sources, which agree on which dates are special. They disagree
+# on classification and close times -- which is precisely why we trade none
+# of them, so the disagreement cannot reach a decision.
+CALENDAR_DATES_CROSS_CHECKED_2026: Final[bool] = True
 CALENDAR_SOURCE: Final[str] = (
     "https://www.cmegroup.com/tools-information/holiday-calendar.html"
 )
 
 __all__ = [
     "CALENDAR_VERIFIED",
+    "CALENDAR_DATES_CROSS_CHECKED_2026",
     "CALENDAR_SOURCE",
     "COVERAGE",
     "DayStatus",
@@ -75,7 +81,7 @@ class SessionDay:
         return self.status is DayStatus.OPEN
 
 
-COVERAGE: Final[tuple[date, date]] = (date(2026, 1, 1), date(2027, 12, 31))
+COVERAGE: Final[tuple[date, date]] = (date(2026, 1, 1), date(2026, 12, 31))
 
 # Recorded as a label only. Nothing computes with these times -- see the
 # module docstring. The figure is disputed between sources, which is the
@@ -88,10 +94,6 @@ HOLIDAYS: Final[dict[date, str]] = {
     date(2026, 4, 3): "Good Friday",
     date(2026, 11, 26): "Thanksgiving Day",
     date(2026, 12, 25): "Christmas Day",
-    date(2027, 1, 1): "New Year's Day",
-    date(2027, 3, 26): "Good Friday",
-    date(2027, 11, 25): "Thanksgiving Day",
-    date(2027, 12, 24): "Christmas Day (observed, 25th is a Saturday)",
 }
 
 # Half-days. Equity-index futures trade a shortened session, but the close
@@ -103,15 +105,27 @@ HALF_DAYS: Final[dict[date, tuple[str, str]]] = {
     date(2026, 6, 19): (_EARLY, "Juneteenth"),
     date(2026, 7, 3): (_EARLY, "Independence Day (observed, 4th is a Saturday)"),
     date(2026, 9, 7): (_EARLY, "Labor Day"),
+    date(2026, 7, 2): (_EARLY, "Day before Independence Day (observed)"),
     date(2026, 11, 27): (_EARLY, "Day after Thanksgiving"),
     date(2026, 12, 24): (_EARLY, "Christmas Eve"),
-    date(2027, 1, 18): (_EARLY, "Martin Luther King Jr. Day"),
-    date(2027, 2, 15): (_EARLY, "Presidents' Day"),
-    date(2027, 5, 31): (_EARLY, "Memorial Day"),
-    date(2027, 6, 18): (_EARLY, "Juneteenth (observed, 19th is a Saturday)"),
-    date(2027, 7, 5): (_EARLY, "Independence Day (observed, 4th is a Sunday)"),
-    date(2027, 9, 6): (_EARLY, "Labor Day"),
-    date(2027, 11, 26): (_EARLY, "Day after Thanksgiving"),
+}
+
+# 2027 was never cross-checked against anything. It is deliberately OUTSIDE
+# COVERAGE, so every 2027 date already refuses. These rows are a starting
+# point for that verification pass, not a calendar -- classify() never reads
+# them, and a test asserts it never will.
+DRAFT_2027_UNVERIFIED: Final[dict[date, str]] = {
+    date(2027, 1, 1): "New Year's Day",
+    date(2027, 1, 18): "Martin Luther King Jr. Day",
+    date(2027, 2, 15): "Presidents' Day",
+    date(2027, 3, 26): "Good Friday",
+    date(2027, 5, 31): "Memorial Day",
+    date(2027, 6, 18): "Juneteenth (observed)",
+    date(2027, 7, 5): "Independence Day (observed)",
+    date(2027, 9, 6): "Labor Day",
+    date(2027, 11, 25): "Thanksgiving Day",
+    date(2027, 11, 26): "Day after Thanksgiving",
+    date(2027, 12, 24): "Christmas Day (observed)",
 }
 
 
