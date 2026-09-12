@@ -8,16 +8,15 @@ only that a date in the table is treated correctly.
 
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date
 
 import market_calendar as mc
 
 
-def test_a_regular_weekday_is_open_with_no_early_close():
+def test_a_regular_weekday_is_open():
     day = mc.classify(date(2026, 9, 16))  # Wednesday
     assert day.status is mc.DayStatus.OPEN
     assert day.tradable is True
-    assert day.close_et is None
 
 
 def test_saturday_and_sunday_are_closed():
@@ -35,16 +34,22 @@ def test_a_full_holiday_is_closed():
     assert "Thanksgiving" in day.label
 
 
-def test_an_early_close_day_is_tradable_but_carries_a_close_time():
+def test_a_holiday_half_day_is_not_tradable():
+    """The market is open; we stand aside anyway (DECISIONS.md).
+
+    The close time is disputed between sources and Topstep sets its own by
+    announcement, so there is no number worth computing a deadline from.
+    """
     day = mc.classify(date(2026, 11, 27))
-    assert day.status is mc.DayStatus.EARLY_CLOSE
-    assert day.tradable is True, "futures still trade a shortened session"
-    assert day.close_et == time(13, 0)
-    assert mc.early_close_et(date(2026, 11, 27)) == time(13, 0)
+    assert day.status is mc.DayStatus.HOLIDAY_HALF_DAY
+    assert day.tradable is False
+    assert "do not trade" in day.label
 
 
-def test_regular_days_report_no_early_close():
-    assert mc.early_close_et(date(2026, 9, 16)) is None
+def test_no_close_time_is_exposed_for_computation():
+    """The times are labels only, so nothing can quietly compute with them."""
+    assert not hasattr(mc.classify(date(2026, 11, 27)), "close_et")
+    assert not hasattr(mc, "early_close_et")
 
 
 def test_dates_outside_coverage_fail_closed():
@@ -62,20 +67,26 @@ def test_coverage_bounds_are_inclusive():
     assert mc.classify(high).status is not mc.DayStatus.OUT_OF_COVERAGE
 
 
-def test_holidays_and_early_closes_do_not_overlap():
+def test_holidays_and_half_days_do_not_overlap():
     """A date cannot be both shut and shortened; classify would pick one."""
-    assert not (set(mc.HOLIDAYS) & set(mc.EARLY_CLOSES))
+    assert not (set(mc.HOLIDAYS) & set(mc.HALF_DAYS))
+
+
+def test_no_holiday_date_of_any_kind_is_tradable():
+    """The single rule that replaces all early-close arithmetic."""
+    for d in (*mc.HOLIDAYS, *mc.HALF_DAYS):
+        assert mc.is_open(d) is False, f"{d} must not be tradable"
 
 
 def test_no_calendar_entry_falls_on_a_weekend():
     """A weekend entry is a transcription error: weekends are already closed."""
-    for d in (*mc.HOLIDAYS, *mc.EARLY_CLOSES):
+    for d in (*mc.HOLIDAYS, *mc.HALF_DAYS):
         assert d.weekday() < 5, f"{d} is a {d:%A}; check the source calendar"
 
 
 def test_every_calendar_entry_is_inside_coverage():
     low, high = mc.COVERAGE
-    for d in (*mc.HOLIDAYS, *mc.EARLY_CLOSES):
+    for d in (*mc.HOLIDAYS, *mc.HALF_DAYS):
         assert low <= d <= high, f"{d} is outside COVERAGE and will never be read"
 
 

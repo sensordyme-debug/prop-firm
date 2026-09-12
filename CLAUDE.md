@@ -1,33 +1,46 @@
 # Topstep Algo — project context
 
-Read this before writing any code. It carries the decisions already made so they
-don't get re-litigated or accidentally violated.
+Read this before writing any code. It carries the engineering context: how the
+system is built and why it is built that way.
+
+## Project documents — read all four
+
+| File | What it is for | Authority |
+|---|---|---|
+| **FIRM_RULES.md** | Every Topstep and contract number, each tagged VERIFIED / DERIVED / UNVERIFIED | **Authoritative on any number that governs trading.** If this file and any other disagree, FIRM_RULES.md wins and the other is a bug |
+| **DECISIONS.md** | Settled choices and what was rejected, with reasons | Authoritative on *why*. Do not quietly work around one — say so instead |
+| **ROADMAP.md** | Staged plan, gates, and the status log | Authoritative on what to build next and what "done" means |
+| **CLAUDE.md** (this file) | Architecture, the caller contract, verified SDK behaviour | Authoritative on how the code is shaped |
+
+Firm numbers are **not** duplicated here. Where this file used to restate a
+limit, it now points to FIRM_RULES.md instead, so there is exactly one place a
+number can be wrong. Anything tagged UNVERIFIED there must have a fail-closed
+guard in code before it governs behaviour.
 
 ## What this is
 
 An automated futures trading bot for a **Topstep 50K Trading Combine** account,
 written in Python against the **ProjectX Gateway API** via the `project-x-py` SDK.
 
-Owner: Monish. Sole author — the strategy must remain solely owned and must not be
-shared, sold, or run at another prop firm. Keep git history clean and attributable;
-it is the evidence of sole ownership if Topstep ever asks.
+Owner: Monish. Ownership and the automation policy are stated in FIRM_RULES.md —
+in short, the rule concerns other *traders*, not tools, so building with AI
+assistance is normal. Keep the repo private and the history clean.
 
 ## Hard rules that end the account
 
-These are firm rules, not preferences. Violating any of them is not a bug, it is a
-blown account.
+**See FIRM_RULES.md.** Profit target, Max Loss Limit, Daily Loss Limit,
+consistency target, contract caps, trading hours, automation policy and the MNQ
+contract specs all live there with their verification status. They are firm
+rules, not preferences: violating one is not a bug, it is a blown account.
 
-| Rule | Value | Consequence |
-|---|---|---|
-| Max Loss Limit (the "One Rule") | $2,000, EOD trailing | **Permanent failure.** Enforced in real time on net liquidation, including open P&L. |
-| Daily Loss Limit | $1,000 (Responsible Trading Advantage) | Locks the account for that session only. |
-| Consistency target (Combine) | 55% | Best single day must stay within 55% of the $3,000 profit target. |
-| Profit target (Combine) | $3,000 | Pass condition. No minimum trading days. |
-| Max contracts | 5 mini / 50 micro | Micros count 10:1. |
-| Flat by (firm) | 15:10 CT / 16:10 ET | Positions must be closed. Day trading only, no overnight. Topstep risk managers **begin flattening at 16:08 ET** — their deadline is already too late to start acting. |
-| Flat by (ours) | **15:55 ET** | Our own hard flatten, 13 minutes before Topstep's desk intervenes. This is the value the governor enforces. |
-| HFT | Prohibited | No latency arbitrage, no sub-second churn. |
-| Hosting | Personal device only | **No VPS, no VPN, no remote server may transmit orders.** A server may log, backtest and serve read-only dashboards. |
+Two that shape almost every design choice here:
+
+- The **MLL is the only permanent-failure rule**, it is enforced in real time
+  against net liquidation including unrealised P&L, and **the API does not
+  expose it** — `src/mll_tracker.py` reconstructs it and fails closed.
+- **Everything must be flat before Topstep's desk acts.** We flatten at our own
+  time, well inside theirs; the exact figures are in FIRM_RULES.md and the
+  governor reads them from `Config`.
 
 ## Non-negotiable design constraints
 
@@ -49,13 +62,13 @@ blown account.
 
 Flatten and disable for the session on any of:
 - Daily profit target reached (+$500)
-- Daily loss reached (-$250) — far inside the firm's $1,000 DLL
-- Clock reaches **15:55 ET** (firm deadline is 16:10 ET; their risk
-  managers start flattening at 16:08 ET, so 15:55 leaves 13 minutes)
+- Daily loss reached (-$250) — deliberately far inside the firm's own DLL
+- Clock reaches our hard flatten (`Config.hard_flatten_et`; the figure and the
+  firm deadline it is derived from are in FIRM_RULES.md)
 - Net liquidation comes within $400 of the trailing MLL floor
 
 Refuse to open a new position when:
-- Fewer than 10 minutes remain before the hard flatten (so: no new entry after 15:45 ET)
+- Fewer than `entry_lockout_minutes` remain before the hard flatten
 - A position is already open
 - State is unreconciled after a reconnect
 - The kill switch file exists
@@ -84,9 +97,12 @@ Also required: a one-action kill switch that flattens everything and stops.
   microscalping concern
 
 This is a **hypothesis, not a validated edge.** Judge backtests on drawdown, not
-profit: reject any parameter set with max drawdown over $1,200, 5+ consecutive
-losing days, or fewer than 200 trades of evidence. Tune at most two parameters —
-more than that is curve-fitting.
+profit. The acceptance gates are in **ROADMAP.md, Stage 4** — `backtest.passes_gates()`
+implements them so the decision is mechanical rather than a judgement made while
+looking at a profit number. Tune at most two parameters; more is curve-fitting.
+
+Note: the strategy itself is **not written yet**. The harness comes first, the
+same way the governor did.
 
 ## SDK notes
 
@@ -147,11 +163,9 @@ never fall back to `balance`. `governor_adapter.value_positions` raises
 Signature: `unrealized_pnl(current_price: float, tick_value: float = 1.0)`.
 
 It multiplies a **point** difference by `tick_value`, and the default is `1.0`.
-For MNQ the correct figure is:
+The correct MNQ point value is in FIRM_RULES.md (contract specs).
 
-    point value = tickValue / tickSize = 0.50 / 0.25 = $2.00 per index point
-
-So accepting the default reports **exactly half** of every move. A real $80
+Accepting the default reports **exactly half** of every move. A real $80
 stop-out reads as $40; the $250 session loss limit does not fire until the
 account is actually down $500; the $400 MLL buffer is really $800 of exposure.
 Every dollar figure in the system inherits this error, and nothing about the
@@ -166,9 +180,10 @@ Defences, all three in place:
 
 ### 3. The trailing MLL floor is not exposed anywhere — confirmed
 
-This was searched properly, because keeping our own books on the single rule
-that permanently ends the account is not something to do on an assumption.
-Swept the installed 4.3.0 for any field, endpoint or event carrying it:
+The rule, the formula and Topstep's worked example are in FIRM_RULES.md. What
+belongs here is the evidence and the consequence.
+
+Swept the installed SDK 4.3.0 for anything carrying it:
 
 - **Every model**: `Account` returns only `id, name, balance, canTrade,
   isVisible, simulated`. No other model has a loss/drawdown/limit field.
@@ -180,34 +195,24 @@ Swept the installed 4.3.0 for any field, endpoint or event carrying it:
 - `RiskConfig` and `stats_types.max_loss_limit` are **client-side settings we
   would be choosing ourselves**, not the firm's figure.
 
-**Conclusion: absent. It is not an oversight that we track it ourselves —
-there is nothing to read.** `src/mll_tracker.py` reconstructs it:
-
-    mll_floor = min(max_eod_balance_ever_seen − mll_distance, starting_balance)
-
-trailing the end-of-day close, rising only, locking permanently once it reaches
-the starting balance. Seed it from the dashboard and reconcile daily:
+**It is genuinely absent — not an oversight that we track it ourselves.**
+`src/mll_tracker.py` reconstructs it, seeded from the dashboard and reconciled
+daily:
 
     python -m src.mll_tracker --seed --mll 48000
     python -m src.mll_tracker --verify --mll <displayed floor>
 
-On disagreement it always adopts the HIGHER floor — less headroom, stops us
+On disagreement it adopts the **higher** floor — less headroom, stops us
 sooner. Missing, stale or unparseable state yields `MLL_STATE_UNAVAILABLE` and
 a halt. It never estimates and never defaults: a floor of zero would make the
 buffer check pass unconditionally and disable the guard in silence.
 
-**Funded-account note (not yet implemented).** On a funded XFA account Topstep
-sets the MLL to $0 permanently after the first payout. That is a different
-regime, not a different number — when this account is funded it needs an
-explicit state transition in the tracker, not an edited `mll_distance`.
+### 4. `equity` may exist on the realtime feed
 
-### 4. `equity` may exist on the realtime feed — worth checking
-
-`AccountUpdatePayload` declares optional `equity` and `margin`. If the gateway
-actually populates `equity` it is likely a true net liquidation, which would be
-more authoritative than deriving it from balance plus unrealised P&L. Nothing
-depends on this today, and the derivation stands until someone confirms it on a
-live realtime connection. Worth checking when the feed is first wired up.
+`AccountUpdatePayload` declares optional `equity` and `margin`. If populated,
+`equity` is likely the broker's own net liquidation and would beat our
+`balance + unrealised P&L` derivation. Tracked as UNVERIFIED in FIRM_RULES.md;
+nothing depends on it, and the derivation stands until the feed is live.
 
 ## Governor caller contract
 
@@ -234,19 +239,24 @@ so the loss limit, the profit target and everything else derived from
 
 ## Market calendar
 
-`src/market_calendar.py` is a data table of CME equity-index holidays and
-early closes for 2026–2027. Without it the governor would happily return
-CONTINUE on a Saturday morning.
+`src/market_calendar.py` is a data table of CME equity-index holiday dates for
+2026–2027. Without it the governor would happily return CONTINUE on a Saturday
+morning.
 
-- Weekend or holiday → `MARKET_CLOSED`, entry refused.
-- Early close (13:00 ET): Topstep moves the flat deadline to 15 minutes before
-  the close and we take our usual 15 on top, so the flatten becomes **12:30**.
+- Weekend, holiday, or **holiday half-day** → `MARKET_CLOSED`, entry refused.
 - Dates outside coverage fail **closed**, so an unmaintained calendar costs a
   missed session rather than an unwatched position.
+- **There is no early-close arithmetic and no `close_et` field.** Per
+  DECISIONS.md we stand aside on every holiday date, half-days included:
+  sources disagree on the close times and Topstep announces its own deadline by
+  Discord, so there is no trustworthy number to compute a flat time from. The
+  times are stored as text labels precisely so nothing can compute with them.
+  This costs ~12 of ~250 sessions and removes a whole failure mode — do not
+  optimise it back in.
 
-**The table is an unverified best reconstruction.** `CALENDAR_VERIFIED` is
-`False` and a test holds it there deliberately. Check every row against
-CME's published calendar before trading real size, then flip it.
+`CALENDAR_VERIFIED` is `False` and a test holds it there deliberately. The
+*dates* still need checking against CME; refusing to trade them is what makes
+that safe to defer, not a reason to skip it.
 
 ## Build order — do not reorder
 

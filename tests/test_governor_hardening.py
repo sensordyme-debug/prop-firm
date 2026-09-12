@@ -260,8 +260,6 @@ def test_zero_floor_buffer_is_allowed():
         ({"daily_profit_target": -500.0}, "daily_profit_target"),
         ({"max_trades_per_session": -1}, "max_trades_per_session"),
         ({"entry_lockout_minutes": -5}, "entry_lockout_minutes"),
-        ({"firm_flat_margin_minutes": -1}, "firm_flat_margin_minutes"),
-        ({"our_flat_margin_minutes": -1}, "our_flat_margin_minutes"),
         ({"anchor_tolerance": -0.01}, "anchor_tolerance"),
     ],
 )
@@ -321,28 +319,32 @@ def test_normal_weekday_is_not_market_closed():
     )
 
 
-def test_early_close_moves_the_flatten_to_1230():
-    """13:00 close -> firm deadline 12:45 -> ours 12:30."""
+def test_holiday_half_day_refuses_entry_entirely():
+    """DECISIONS.md: we stand aside on every holiday date, half-days included.
+
+    Sources disagree on the close time and Topstep announces its own by
+    Discord, so there is no trustworthy number to compute a deadline from.
+    Refusing the whole date removes the need for one.
+    """
+    d = decide(snap(now=datetime(2026, 11, 27, 10, 0, tzinfo=ET)))
+    assert d.action is Action.REFUSE_ENTRY
+    assert d.code == Reason.MARKET_CLOSED
+    assert "half-day" in d.reason
+
+
+def test_no_early_close_arithmetic_survives_anywhere():
+    """The flatten is 15:55 on a half-day too, because we never trade one."""
     assert hard_flatten_at(datetime(2026, 11, 27, 10, 0, tzinfo=ET)) == datetime(
-        2026, 11, 27, 12, 30, tzinfo=ET
+        2026, 11, 27, 15, 55, tzinfo=ET
     )
 
 
-def test_early_close_day_still_allows_a_morning_entry():
-    assert decide(snap(now=datetime(2026, 11, 27, 10, 0, tzinfo=ET))).action is (
-        Action.CONTINUE
-    )
-
-
-def test_early_close_day_halts_at_1230_not_1555():
-    d = decide(snap(now=datetime(2026, 11, 27, 12, 30, tzinfo=ET)))
-    assert d.action is Action.FLATTEN_AND_HALT
-    assert d.code == Reason.HARD_FLATTEN_TIME
-
-
-def test_early_close_day_does_not_halt_one_second_before():
-    d = decide(snap(now=datetime(2026, 11, 27, 12, 29, 59, tzinfo=ET)))
-    assert d.action is not Action.FLATTEN_AND_HALT
+def test_half_day_is_refused_at_every_hour_of_its_session():
+    for hour in (9, 10, 11, 12, 13, 14):
+        d = decide(snap(now=datetime(2026, 11, 27, hour, 30, tzinfo=ET)))
+        assert d.code in (Reason.MARKET_CLOSED, Reason.HARD_FLATTEN_TIME,
+                          Reason.AFTER_ENTRY_CUTOFF), f"hour {hour} -> {d.code}"
+        assert d.action is not Action.CONTINUE
 
 
 def test_regular_day_keeps_the_1555_flatten():

@@ -3,8 +3,9 @@
 Stages are gated. **Do not start a stage until the previous gate is met.** The
 gates exist because each one is a documented way these accounts die.
 
-Current state: governor, market calendar, MLL tracker and connection test are
-built and unit-tested. No code has ever touched a live account.
+Current state: governor, market calendar, MLL tracker, connection test and the
+backtest harness are built and unit-tested. No code has ever touched a live
+account, and no strategy exists yet.
 
 ---
 
@@ -166,7 +167,21 @@ Append one line per gate cleared, with the date and the evidence.
 - [ ] Stage 0 — key in .env
 - [ ] Stage 1 — connection test passed
 - [ ] Stage 2 — history depth known, MLL seeded
-- [ ] Stage 3 — harness validated
+- [x] **Stage 3 — harness validated · 2026-09-12**
+      Evidence: `src/backtest.py` with 40 tests in `tests/test_backtest.py`.
+      - Hand-computed fixture reproduced to the cent: two trades, +$78.18 and
+        -$41.82, total **+$36.36** (`test_total_net_profit_to_the_cent`).
+      - No-lookahead is structural: a strategy reaching for `bars[index + 1]`
+        raises `LookaheadError` and fails the run
+        (`test_a_peeking_strategy_fails_the_backtest`).
+      - The real governor runs in the replay path; halts are reported with
+        their reason codes (`test_governor_halts_are_recorded_with_reasons`,
+        `test_report_lists_halts_with_reasons`).
+      - Stop wins every both-touched bar (`test_a_bar_touching_both_stop_and_
+        target_fills_the_stop`).
+      CAVEAT: validated on **synthetic** bars only. Running it on real data is
+      still gated on Stage 1, because bar timestamp semantics are UNVERIFIED —
+      `BarSeries` refuses `BarTimestamp.UNKNOWN` rather than assuming one.
 - [ ] Stage 4 — strategy meets all four gates
 - [ ] Stage 5 — clean dry run, reboot survived
 - [ ] Stage 6 — ten clean live sessions

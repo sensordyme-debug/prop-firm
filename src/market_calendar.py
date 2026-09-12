@@ -12,11 +12,20 @@ computed from rules that would drift.
 
       https://www.cmegroup.com/tools-information/holiday-calendar.html
 
-  A wrong early-close row is the dangerous kind: it means holding a position
-  into a close we did not expect. A wrong holiday row is merely a missed day.
   Verify before trading real size, then flip the flag.
 
-Dates outside ``COVERAGE`` are treated as CLOSED, not assumed open. Failing
+WE DO NOT TRADE HOLIDAY DATES AT ALL -- including half-days (DECISIONS.md).
+Sources agree on the dates but disagree on the *times* (12:00 vs 12:15 CT, and
+whether some days are full closures), and on half-days Topstep sets its own
+deadline by Discord announcement rather than by CME's calendar. Rather than
+compute a flat time from a contested number, every holiday date is simply not
+tradable. It costs ~12 of ~250 sessions on a strategy taking 1-2 trades a day
+and removes an entire failure mode. Do not optimise this back in.
+
+Consequently there is no early-close time arithmetic here, and no ``close_et``:
+the times are recorded as labels only, so that nothing can compute with them.
+
+Dates outside ``COVERAGE`` are treated as closed, not assumed open. Failing
 closed on an unmaintained calendar costs a missed session; failing open costs
 a position nobody is watching.
 """
@@ -24,7 +33,7 @@ a position nobody is watching.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, time, timedelta
+from datetime import date, timedelta
 from enum import Enum
 from typing import Final
 
@@ -41,15 +50,14 @@ __all__ = [
     "SessionDay",
     "classify",
     "is_open",
-    "early_close_et",
     "previous_trading_date",
 ]
 
 
 class DayStatus(str, Enum):
     OPEN = "OPEN"
-    CLOSED = "CLOSED"
-    EARLY_CLOSE = "EARLY_CLOSE"
+    CLOSED = "CLOSED"                    # market shut
+    HOLIDAY_HALF_DAY = "HOLIDAY_HALF_DAY"  # market open, but we stand aside
     OUT_OF_COVERAGE = "OUT_OF_COVERAGE"
 
 
@@ -57,16 +65,22 @@ class DayStatus(str, Enum):
 class SessionDay:
     status: DayStatus
     label: str
-    close_et: time | None = None
 
     @property
     def tradable(self) -> bool:
-        return self.status in (DayStatus.OPEN, DayStatus.EARLY_CLOSE)
+        """Only a full regular session is tradable.
+
+        Half-days are deliberately excluded even though the market is open.
+        """
+        return self.status is DayStatus.OPEN
 
 
 COVERAGE: Final[tuple[date, date]] = (date(2026, 1, 1), date(2027, 12, 31))
 
-_EARLY = time(13, 0)  # 13:00 ET, the usual CME equity-index shortened close
+# Recorded as a label only. Nothing computes with these times -- see the
+# module docstring. The figure is disputed between sources, which is the
+# whole reason we stand aside on these dates.
+_EARLY = "reported early close ~13:00 ET, time disputed"
 
 # Full closures: no equity-index session at all.
 HOLIDAYS: Final[dict[date, str]] = {
@@ -80,9 +94,9 @@ HOLIDAYS: Final[dict[date, str]] = {
     date(2027, 12, 24): "Christmas Day (observed, 25th is a Saturday)",
 }
 
-# Shortened sessions. Equity-index futures trade but close early; the US cash
-# market is shut on most of these, so liquidity is thin well before the close.
-EARLY_CLOSES: Final[dict[date, tuple[time, str]]] = {
+# Half-days. Equity-index futures trade a shortened session, but the close
+# time is contested and Topstep announces its own deadline, so we stand aside.
+HALF_DAYS: Final[dict[date, tuple[str, str]]] = {
     date(2026, 1, 19): (_EARLY, "Martin Luther King Jr. Day"),
     date(2026, 2, 16): (_EARLY, "Presidents' Day"),
     date(2026, 5, 25): (_EARLY, "Memorial Day"),
@@ -123,20 +137,18 @@ def classify(trading_date: date) -> SessionDay:
     if trading_date in HOLIDAYS:
         return SessionDay(DayStatus.CLOSED, HOLIDAYS[trading_date])
 
-    if trading_date in EARLY_CLOSES:
-        close, label = EARLY_CLOSES[trading_date]
-        return SessionDay(DayStatus.EARLY_CLOSE, label, close_et=close)
+    if trading_date in HALF_DAYS:
+        note, label = HALF_DAYS[trading_date]
+        return SessionDay(
+            DayStatus.HOLIDAY_HALF_DAY,
+            f"{label} half-day ({note}); we do not trade holiday dates",
+        )
 
     return SessionDay(DayStatus.OPEN, "regular session")
 
 
 def is_open(trading_date: date) -> bool:
     return classify(trading_date).tradable
-
-
-def early_close_et(trading_date: date) -> time | None:
-    """The early close for this date, or None on a regular/closed day."""
-    return classify(trading_date).close_et
 
 
 def previous_trading_date(trading_date: date, limit: int = 10) -> date | None:

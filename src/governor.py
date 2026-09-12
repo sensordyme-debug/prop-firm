@@ -178,12 +178,6 @@ class Config:
     rth_open_et: time = time(9, 30)
     entry_lockout_minutes: int = 10
 
-    # Early closes. Topstep moves the flat deadline to 15 minutes before an
-    # early close; we then take our usual 15-minute margin on top. On a 13:00
-    # ET close that is a 12:30 flatten.
-    firm_flat_margin_minutes: int = 15
-    our_flat_margin_minutes: int = 15
-
     # Optional guards. Each can be switched off independently without
     # touching the four mandated trip-wires.
     enforce_rth_open: bool = True
@@ -215,12 +209,6 @@ class Config:
                    "zero or positive")
         if self.entry_lockout_minutes < 0:
             reject("entry_lockout_minutes", self.entry_lockout_minutes,
-                   "zero or positive")
-        if self.firm_flat_margin_minutes < 0:
-            reject("firm_flat_margin_minutes", self.firm_flat_margin_minutes,
-                   "zero or positive")
-        if self.our_flat_margin_minutes < 0:
-            reject("our_flat_margin_minutes", self.our_flat_margin_minutes,
                    "zero or positive")
         if self.anchor_tolerance < 0:
             reject("anchor_tolerance", self.anchor_tolerance, "zero or positive")
@@ -424,28 +412,19 @@ def _session_clock_time(now: datetime, at: time, config: Config) -> datetime:
 
 
 def hard_flatten_at(now: datetime, config: Config | None = None) -> datetime:
-    """The hard flatten for the session containing ``now``.
+    """The 15:55 ET hard flatten for the session containing ``now``.
 
-    Normally 15:55 ET. On an early-close date the firm's deadline moves to
-    15 minutes before the close, and we take our own margin on top of that, so
-    a 13:00 ET close gives a 12:30 flatten. The earlier of the two always wins.
+    Always 15:55. There is deliberately no early-close arithmetic: we do not
+    trade holiday dates at all (DECISIONS.md), so a shortened session never
+    needs a computed deadline. The half-day close times are disputed between
+    sources and Topstep announces its own by Discord, so computing from them
+    would be building on a contested number. Standing aside removes the need.
+
+    If those times are ever verified, that does NOT by itself reopen trading on
+    those dates -- that was a separate decision, made on its own grounds.
     """
     cfg = config or Config()
-    trading_date = session_trading_date(now, cfg)
-    flatten_time = cfg.hard_flatten_et
-
-    if cfg.enforce_market_calendar:
-        day = classify(trading_date)
-        if day.close_et is not None:
-            close = datetime.combine(trading_date, day.close_et, tzinfo=cfg.tz)
-            firm_deadline = close - timedelta(minutes=cfg.firm_flat_margin_minutes)
-            ours = firm_deadline - timedelta(minutes=cfg.our_flat_margin_minutes)
-            # .time() drops the zone outright; .timetz().replace(tzinfo=None)
-            # would do the same thing while looking like the localisation bug
-            # that `.replace(tzinfo=...)` is banned for.
-            flatten_time = min(flatten_time, ours.time())
-
-    return datetime.combine(trading_date, flatten_time, tzinfo=cfg.tz)
+    return _session_clock_time(now, cfg.hard_flatten_et, cfg)
 
 
 def entry_cutoff_at(now: datetime, config: Config | None = None) -> datetime:
