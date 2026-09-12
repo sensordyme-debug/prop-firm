@@ -44,7 +44,13 @@ from project_x_py import ProjectX
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from governor_adapter import MNQ_POINT_VALUE  # noqa: E402
+import market_calendar as mc  # noqa: E402
+from governor_adapter import (  # noqa: E402
+    MNQ_POINT_VALUE,
+    load_mll_floor,
+    now_utc,
+    to_et,
+)
 
 SYMBOL = "MNQ"
 FORBIDDEN = ("place", "submit", "cancel", "modify", "buy", "sell", "flatten", "liquidate")
@@ -243,25 +249,51 @@ async def run() -> int:
             print(f"  POSSIBLE MLL FIELDS FOUND: {', '.join(candidates)}")
             for f in candidates:
                 print(f"    {f} = {getattr(account, f, '?')}")
-            print("  Verify whether any of these is the trailing MLL floor.")
+            print("  If any of these IS the trailing floor, say so -- we could")
+            print("  then retire the local reconstruction entirely.")
         else:
             print("  *** THE TRAILING MLL FLOOR IS NOT EXPOSED BY THIS API. ***")
-            print("  No field on Account corresponds to it, and the SDK's")
-            print("  max_loss_limit / RiskConfig values are client-side settings,")
-            print("  not the firm's floor.")
-            print()
-            print("  The governor REQUIRES this value -- it is the only")
-            print("  permanent-failure guard. It must therefore come from:")
-            print("    (a) the TopstepX dashboard, entered as MLL_FLOOR in .env; or")
-            print("    (b) tracked locally as (highest end-of-day balance - 2000),")
-            print("        locking at 50,000 once the account reaches 52,000.")
-            print("  Option (b) must be reconciled against the dashboard daily")
-            print("  until it is proven to agree. A wrong floor silently disables")
-            print("  the guard: too low and it never fires, too high and it fires")
-            print("  constantly.")
-            print()
-            print(f"  MLL_FLOOR currently in .env: "
-                  f"{os.environ.get('MLL_FLOOR') or '(unset)'}")
+            print("  Confirmed by sweeping the installed SDK: no model field, none")
+            print("  of the 21 endpoints, and no websocket payload carries it. The")
+            print("  SDK's max_loss_limit / RiskConfig values are client-side")
+            print("  settings we would be choosing ourselves, not the firm's floor.")
+            print("  This is why src/mll_tracker.py keeps our own books on it.")
+
+        floor, explanation = load_mll_floor(to_et(now_utc()).date())
+        print()
+        print(f"  locally tracked floor: "
+              f"{'UNAVAILABLE' if floor is None else f'${floor:,.2f}'}")
+        print(f"    {explanation}")
+        if floor is None:
+            print("  The governor will HALT until this is resolved. That is by")
+            print("  design: a guessed floor is worse than no trading.")
+        else:
+            print(f"  Cross-check this against the TopstepX dashboard now:")
+            print(f"    python -m src.mll_tracker --verify --mll <displayed floor>")
+            if headroom_note := (net_liq - floor):
+                print(f"  Current headroom above the floor: ${headroom_note:,.2f}")
+
+        rule("7. Is net liquidation available directly?")
+        print("  The REST Account model has no net-liq field, which is why net liq")
+        print("  is derived above. But the realtime account websocket payload")
+        print("  (AccountUpdatePayload) declares OPTIONAL 'equity' and 'margin'")
+        print("  fields. If the gateway actually populates 'equity', it is likely")
+        print("  a true net liquidation figure and would be more authoritative")
+        print("  than our derivation.")
+        print()
+        print("  THIS SCRIPT CANNOT CHECK THAT: it opens no realtime connection.")
+        print("  Worth confirming when the realtime feed is first wired up.")
+
+        rule("8. Market calendar")
+        print(f"  coverage        {mc.COVERAGE[0]} to {mc.COVERAGE[1]}")
+        print(f"  verified        {mc.CALENDAR_VERIFIED}")
+        if not mc.CALENDAR_VERIFIED:
+            print("  *** The holiday/early-close table is an UNVERIFIED best")
+            print("      reconstruction. Check it against CME before trading size:")
+            print(f"      {mc.CALENDAR_SOURCE}")
+        today_et = to_et(now_utc()).date()
+        day = mc.classify(today_et)
+        print(f"  today ({today_et}) {day.status.value} -- {day.label}")
 
         rule("RESULT")
         print("  Gate 1 PASSED: authenticated, real balance, real bars.")

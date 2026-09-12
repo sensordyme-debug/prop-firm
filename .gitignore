@@ -8,3 +8,4 @@ logs/*.jsonl
 .DS_Store
 .idea/
 .vscode/
+mll_state.json

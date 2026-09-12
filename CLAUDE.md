@@ -60,6 +60,17 @@ Refuse to open a new position when:
 - State is unreconciled after a reconnect
 - The kill switch file exists
 
+Halt first, before any of the above, when the state itself cannot be trusted:
+- `STALE_SESSION_ANCHOR` — the anchor does not belong to this session, so every
+  limit derived from session P&L is measuring the wrong day
+- `MLL_STATE_UNAVAILABLE` — the tracked floor is missing, stale or unparseable
+
+Further refusals beyond the four above:
+- `MARKET_CLOSED` — weekend, holiday, or outside the calendar's coverage
+- `TRADE_COUNT_DRIFT` — observed fills disagree with the tracked trade count
+- `SESSION_ANCHOR_MISMATCH` — governor and adapter anchors disagree
+- `BEFORE_RTH_OPEN` — before 09:30 ET, which makes an overnight entry impossible
+
 Also required: a one-action kill switch that flattens everything and stops.
 
 ## Strategy v0.1 spec — opening range breakout, MNQ
@@ -153,22 +164,89 @@ Defences, all three in place:
 - A test asserts 2 MNQ down 10 points is `-$40.00`, and an AST test fails the
   build if any call site omits the argument.
 
-### 3. The trailing MLL floor is not exposed anywhere
+### 3. The trailing MLL floor is not exposed anywhere — confirmed
 
-Searched the whole package. `Account` has no such field; `RiskConfig` and
-`stats_types.max_loss_limit` are **client-side settings we would be choosing
-ourselves**, not the firm's floor. Nothing in the gateway API reports it.
+This was searched properly, because keeping our own books on the single rule
+that permanently ends the account is not something to do on an assumption.
+Swept the installed 4.3.0 for any field, endpoint or event carrying it:
 
-The governor requires this value — it guards the only permanent-failure rule —
-so it has to come from outside the API:
-- read from the TopstepX dashboard and set as `MLL_FLOOR` in `.env`, or
-- tracked locally as *(highest end-of-day balance − $2,000)*, locking at
-  $50,000 once the account reaches $52,000.
+- **Every model**: `Account` returns only `id, name, balance, canTrade,
+  isVisible, simulated`. No other model has a loss/drawdown/limit field.
+- **All 21 REST endpoints**: `/Account/search`, `/Auth/*`, `/Contract/*`,
+  `/History/retrieveBars`, `/Order/*`, `/Position/*`, `/Status/ping`,
+  `/Trade/search`. None returns account risk limits.
+- **Websocket payloads**: `AccountUpdatePayload` carries `accountId`,
+  `balance`, optional `equity`, optional `margin`, `timestamp`. No floor.
+- `RiskConfig` and `stats_types.max_loss_limit` are **client-side settings we
+  would be choosing ourselves**, not the firm's figure.
 
-Reconcile the tracked value against the dashboard daily until they are proven
-to agree. `mll_floor_from_env()` raises rather than defaulting: a floor of zero
-would make the buffer check pass unconditionally and disable the guard in
-silence, which is worse than crashing.
+**Conclusion: absent. It is not an oversight that we track it ourselves —
+there is nothing to read.** `src/mll_tracker.py` reconstructs it:
+
+    mll_floor = min(max_eod_balance_ever_seen − mll_distance, starting_balance)
+
+trailing the end-of-day close, rising only, locking permanently once it reaches
+the starting balance. Seed it from the dashboard and reconcile daily:
+
+    python -m src.mll_tracker --seed --mll 48000
+    python -m src.mll_tracker --verify --mll <displayed floor>
+
+On disagreement it always adopts the HIGHER floor — less headroom, stops us
+sooner. Missing, stale or unparseable state yields `MLL_STATE_UNAVAILABLE` and
+a halt. It never estimates and never defaults: a floor of zero would make the
+buffer check pass unconditionally and disable the guard in silence.
+
+**Funded-account note (not yet implemented).** On a funded XFA account Topstep
+sets the MLL to $0 permanently after the first payout. That is a different
+regime, not a different number — when this account is funded it needs an
+explicit state transition in the tracker, not an edited `mll_distance`.
+
+### 4. `equity` may exist on the realtime feed — worth checking
+
+`AccountUpdatePayload` declares optional `equity` and `margin`. If the gateway
+actually populates `equity` it is likely a true net liquidation, which would be
+more authoritative than deriving it from balance plus unrealised P&L. Nothing
+depends on this today, and the derivation stands until someone confirms it on a
+live realtime connection. Worth checking when the feed is first wired up.
+
+## Governor caller contract
+
+The governor is pure, so it cannot maintain its own state. Every cycle the
+caller MUST, in order:
+
+1. build the snapshot (adapter supplies `now`, net liq, MLL floor, observed trades)
+2. `state = roll_session(...)` — **miss this and the session anchor goes stale**
+3. `decision = evaluate(...)`
+4. `state = apply_decision(...)` — miss this and a halt is not recorded
+5. on a fill, `state = record_trade(...)` — miss this and the 2-trade budget never binds
+6. persist state; set `last_reconcile` only after really querying positions
+
+Steps 2, 4 and 5 fail *silently* if forgotten, so each now has a detector:
+`STALE_SESSION_ANCHOR` (halt), `SESSION_HALTED`, and `TRADE_COUNT_DRIFT`
+(the adapter counts real entries from the fill history and the governor
+budgets against the higher of the two). **Detection is a backstop, not a
+licence to skip the call.**
+
+Why the anchor check is a halt and not a refusal: a stale anchor measures
+session P&L from the wrong day. A session truly down $250 can read as +$150,
+so the loss limit, the profit target and everything else derived from
+`session_pnl` all go quiet at once. There is no safe way to continue.
+
+## Market calendar
+
+`src/market_calendar.py` is a data table of CME equity-index holidays and
+early closes for 2026–2027. Without it the governor would happily return
+CONTINUE on a Saturday morning.
+
+- Weekend or holiday → `MARKET_CLOSED`, entry refused.
+- Early close (13:00 ET): Topstep moves the flat deadline to 15 minutes before
+  the close and we take our usual 15 on top, so the flatten becomes **12:30**.
+- Dates outside coverage fail **closed**, so an unmaintained calendar costs a
+  missed session rather than an unwatched position.
+
+**The table is an unverified best reconstruction.** `CALENDAR_VERIFIED` is
+`False` and a test holds it there deliberately. Check every row against
+CME's published calendar before trading real size, then flip it.
 
 ## Build order — do not reorder
 

@@ -15,6 +15,7 @@ US DST in 2026: begins Sunday 2026-03-08, ends Sunday 2026-11-01.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -32,11 +33,12 @@ from governor import (
     entry_cutoff_at,
     evaluate,
     hard_flatten_at,
+    effective_trade_count,
     record_trade,
     roll_session,
     rth_open_at,
     session_start_for,
-    update_high_balance,
+    session_trading_date,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,7 +79,6 @@ def snap(
 def state(
     *,
     session_start_balance: float = START_BALANCE,
-    session_high_balance: float = START_BALANCE,
     trades_today: int = 0,
     halted: bool = False,
     halt_reason: str | None = None,
@@ -86,7 +87,6 @@ def state(
 ) -> GovernorState:
     return GovernorState(
         session_start_balance=session_start_balance,
-        session_high_balance=session_high_balance,
         trades_today=trades_today,
         halted=halted,
         halt_reason=halt_reason,
@@ -95,8 +95,28 @@ def state(
     )
 
 
+def anchored(st: GovernorState, snapshot: AccountSnapshot, config=None) -> GovernorState:
+    """Give state the anchor a correct caller would have set via roll_session.
+
+    Most tests are about some OTHER rule, so they should not all have to
+    restate the anchor. Tests that exercise staleness pass one explicitly, or
+    call evaluate() directly with session_start=None.
+    """
+    if st.session_start is None:
+        st = replace(st, session_start=session_start_for(snapshot.now, config or cfg()))
+    return st
+
+
 def decide(snapshot=None, st=None, config=None):
-    return evaluate(snapshot or snap(), st or state(), config or cfg())
+    s = snapshot or snap()
+    c = config or cfg()
+    return evaluate(s, anchored(st or state(), s, c), c)
+
+
+def ev(snapshot, st=None, config=None):
+    """evaluate() with the anchor aligned, for tests that call it directly."""
+    c = config or cfg()
+    return evaluate(snapshot, anchored(st or state(), snapshot, c), c)
 
 
 def elapsed(later: datetime, earlier: datetime) -> timedelta:
@@ -131,17 +151,29 @@ def test_session_pnl_uses_net_liq_not_balance():
     """
     s = snap(net_liq=49_700.0, balance=START_BALANCE, open_position_size=2)
     assert compute_session_pnl(s, state()) == pytest.approx(-300.0)
-    assert evaluate(s, state(), cfg()).session_pnl == pytest.approx(-300.0)
+    assert ev(s).session_pnl == pytest.approx(-300.0)
 
 
 def test_evaluate_is_deterministic_and_uses_snapshot_now_not_wall_clock():
-    """A 2020 timestamp must be judged on its own terms, proving no clock read."""
+    """A 2020 timestamp must be judged on its own terms, proving no clock read.
+
+    The decision cites 2020, not today, which is only possible if ``now`` came
+    from the snapshot. It also demonstrates the calendar failing closed outside
+    its coverage rather than assuming an unknown date is tradable.
+    """
     long_ago = datetime(2020, 5, 6, 10, 0, tzinfo=ET)
     s = snap(now=long_ago)
-    first = evaluate(s, state(), cfg())
-    second = evaluate(s, state(), cfg())
-    assert first == second
-    assert first.action is Action.CONTINUE
+    first = ev(s)
+    second = ev(s)
+    assert first == second, "same inputs must give the same decision"
+    assert "2020-05-06" in first.reason
+    assert first.code == Reason.MARKET_CLOSED
+
+
+def test_evaluate_is_deterministic_on_an_ordinary_day():
+    s = snap(now=datetime(2026, 9, 16, 10, 0, tzinfo=ET))
+    assert ev(s) == ev(s)
+    assert ev(s).action is Action.CONTINUE
 
 
 def test_naive_datetime_is_rejected_not_coerced():
@@ -734,12 +766,6 @@ def test_record_trade_increments_without_mutating():
     assert original.trades_today == 0
 
 
-def test_update_high_balance_tracks_only_new_highs():
-    st = state(session_high_balance=50_000.0)
-    assert update_high_balance(snap(net_liq=50_400.0), st).session_high_balance == 50_400.0
-    assert update_high_balance(snap(net_liq=49_800.0), st).session_high_balance == 50_000.0
-
-
 def test_apply_decision_records_a_halt_only_for_flatten():
     halt = decide(snap(net_liq=49_750.0))
     halted = apply_decision(state(), halt)
@@ -753,7 +779,7 @@ def test_apply_decision_records_a_halt_only_for_flatten():
 def test_halt_then_re_evaluate_keeps_refusing_after_recovery():
     """Once halted, a recovered net liq must not silently re-enable trading."""
     halted = apply_decision(state(), decide(snap(net_liq=49_750.0)))
-    later = evaluate(snap(net_liq=50_100.0), halted, cfg())
+    later = ev(snap(net_liq=50_100.0), halted)
     assert later.action is Action.REFUSE_ENTRY
     assert later.code == Reason.SESSION_HALTED
 

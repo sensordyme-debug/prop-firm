@@ -16,6 +16,40 @@ That is what makes every trip-wire unit-testable at its exact boundary without
 credentials or a live account. All I/O -- reading the account, stat-ing the kill
 file, reading the clock -- belongs to ``governor_adapter.py``.
 
+CALLER CONTRACT -- READ THIS BEFORE WIRING THE STRATEGY
+-------------------------------------------------------
+The governor decides; it cannot maintain its own state. Every function below is
+pure, so the caller MUST perform these steps, in this order, on every cycle:
+
+  1. ``snapshot = await adapter.build_snapshot(...)``
+     Supplies ``now``, net liq, the MLL floor and the observed trade count.
+
+  2. ``state = roll_session(snapshot, state, config)``
+     MISS THIS and the session anchor goes stale after the 18:00 ET roll.
+     Historically this was the worst bug available here: a stale anchor makes
+     ``session_pnl`` measure from the wrong day, so a real -$250 session can
+     read as +$150 and the loss limit never fires. It is now caught -- see
+     ``STALE_SESSION_ANCHOR`` -- but the check exists to make the mistake
+     loud, not to make skipping step 2 acceptable.
+
+  3. ``decision = evaluate(snapshot, state, config)``
+
+  4. ``state = apply_decision(state, decision)``
+     MISS THIS and a halt is not recorded, so the next cycle re-evaluates from
+     scratch and may resume trading after the session was supposed to be over.
+
+  5. On a fill: ``state = record_trade(state)``
+     MISS THIS and ``trades_today`` never increments, so the 2-trade budget
+     never binds. Also now detectable: the adapter counts real entries and
+     ``TRADE_COUNT_DRIFT`` refuses entry when the two disagree.
+
+  6. Persist ``state`` across restarts, and set ``last_reconcile`` only after
+     actually querying live positions and working orders (constraint 5).
+
+Steps 2, 4 and 5 are the ones that fail silently if forgotten, which is why
+each has a corresponding detection path. Detection is a backstop; it is not a
+substitute for calling them.
+
 ACCOUNTING RULES (CLAUDE.md, design constraints 3 and 4)
 --------------------------------------------------------
   * Session P&L is measured against **net liquidation**, never realised P&L.
@@ -24,17 +58,20 @@ ACCOUNTING RULES (CLAUDE.md, design constraints 3 and 4)
   * The session boundary is 18:00 America/New_York, never midnight. All daily
     accounting resets there. See ``session_start_for``.
 
-All datetimes are timezone-aware. Naive datetimes are rejected, not coerced.
+All datetimes must be timezone-aware AND correctly localised. Those are not the
+same requirement -- see ``_require_aware``.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 from typing import Final
 from zoneinfo import ZoneInfo
+
+from market_calendar import DayStatus, classify
 
 ET: Final[ZoneInfo] = ZoneInfo("America/New_York")
 
@@ -47,14 +84,15 @@ __all__ = [
     "GovernorState",
     "GovernorDecision",
     "session_start_for",
+    "session_trading_date",
     "hard_flatten_at",
     "entry_cutoff_at",
     "rth_open_at",
     "compute_session_pnl",
+    "effective_trade_count",
     "evaluate",
     "roll_session",
     "record_trade",
-    "update_high_balance",
     "apply_decision",
 ]
 
@@ -75,6 +113,10 @@ class Reason:
     can never silently weaken a test.
     """
 
+    # -- state integrity: halt, because the numbers cannot be trusted --------
+    STALE_SESSION_ANCHOR = "STALE_SESSION_ANCHOR"
+    MLL_STATE_UNAVAILABLE = "MLL_STATE_UNAVAILABLE"
+
     # -- trip-wires: flatten and halt for the session ----------------------
     MLL_FLOOR_BUFFER = "MLL_FLOOR_BUFFER"
     DAILY_MAX_LOSS = "DAILY_MAX_LOSS"
@@ -85,8 +127,10 @@ class Reason:
     # -- refusals: no new entry, but the session continues ------------------
     SESSION_HALTED = "SESSION_HALTED"
     KILL_SWITCH = "KILL_SWITCH"
+    MARKET_CLOSED = "MARKET_CLOSED"
     UNRECONCILED = "UNRECONCILED"
     SESSION_ANCHOR_MISMATCH = "SESSION_ANCHOR_MISMATCH"
+    TRADE_COUNT_DRIFT = "TRADE_COUNT_DRIFT"
     POSITION_ALREADY_OPEN = "POSITION_ALREADY_OPEN"
     TRADE_COUNT_EXHAUSTED = "TRADE_COUNT_EXHAUSTED"
     NEAR_HARD_FLATTEN = "NEAR_HARD_FLATTEN"
@@ -103,6 +147,10 @@ class Config:
 
     Deliberately far inside Topstep's own limits: the firm's Daily Loss Limit
     is $1,000 and the MLL is $2,000; we stop at $250 and a $400 floor buffer.
+
+    Every field is validated in ``__post_init__``. A risk limit that is merely
+    wrong fails closed (we stop too early); a *negative* one fails OPEN, which
+    is why they are rejected outright rather than clamped.
     """
 
     # Dollar limits.
@@ -130,21 +178,74 @@ class Config:
     rth_open_et: time = time(9, 30)
     entry_lockout_minutes: int = 10
 
+    # Early closes. Topstep moves the flat deadline to 15 minutes before an
+    # early close; we then take our usual 15-minute margin on top. On a 13:00
+    # ET close that is a 12:30 flatten.
+    firm_flat_margin_minutes: int = 15
+    our_flat_margin_minutes: int = 15
+
     # Optional guards. Each can be switched off independently without
     # touching the four mandated trip-wires.
     enforce_rth_open: bool = True
     enforce_anchor_consistency: bool = True
+    enforce_market_calendar: bool = True
     anchor_tolerance: float = 0.01
 
     tz: ZoneInfo = field(default_factory=lambda: ET)
 
+    def __post_init__(self) -> None:
+        def reject(field_name: str, value: object, requirement: str) -> None:
+            raise ValueError(
+                f"Config.{field_name} is {value!r} but must be {requirement}. "
+                "A risk limit outside its valid range does not merely misbehave, "
+                "it can disable the guard entirely."
+            )
+
+        if self.floor_buffer < 0:
+            # The dangerous one. `headroom <= floor_buffer` with a negative
+            # buffer only fires once net liq is ALREADY below the floor, i.e.
+            # after the account is gone. Every other bad value fails closed.
+            reject("floor_buffer", self.floor_buffer, "zero or positive")
+        if self.daily_max_loss <= 0:
+            reject("daily_max_loss", self.daily_max_loss, "a positive magnitude")
+        if self.daily_profit_target <= 0:
+            reject("daily_profit_target", self.daily_profit_target, "positive")
+        if self.max_trades_per_session < 0:
+            reject("max_trades_per_session", self.max_trades_per_session,
+                   "zero or positive")
+        if self.entry_lockout_minutes < 0:
+            reject("entry_lockout_minutes", self.entry_lockout_minutes,
+                   "zero or positive")
+        if self.firm_flat_margin_minutes < 0:
+            reject("firm_flat_margin_minutes", self.firm_flat_margin_minutes,
+                   "zero or positive")
+        if self.our_flat_margin_minutes < 0:
+            reject("our_flat_margin_minutes", self.our_flat_margin_minutes,
+                   "zero or positive")
+        if self.anchor_tolerance < 0:
+            reject("anchor_tolerance", self.anchor_tolerance, "zero or positive")
+
     @classmethod
     def from_env(cls, **overrides: object) -> Config:
-        """Build from environment variables. I/O at the edge, not in decisions."""
+        """Build from environment variables. I/O at the edge, not in decisions.
+
+        An unparseable value raises with the variable named. A bare ``float()``
+        traceback here would be read as a config typo when it is actually a
+        disabled risk limit.
+        """
 
         def _f(name: str, default: float) -> float:
             raw = os.environ.get(name)
-            return default if raw is None or raw.strip() == "" else float(raw)
+            if raw is None or raw.strip() == "":
+                return default
+            try:
+                return float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"environment variable {name}={raw!r} is not a number. "
+                    "Fix .env before starting: the governor will not guess a "
+                    "risk limit."
+                ) from exc
 
         return cls(
             daily_profit_target=_f("DAILY_PROFIT_TARGET", 500.0),
@@ -155,6 +256,17 @@ class Config:
 
 
 def _require_aware(value: datetime, label: str) -> None:
+    """Reject naive datetimes.
+
+    Note what this CANNOT catch: ``datetime.now().replace(tzinfo=ET)`` is
+    aware, passes this check, and is wrong by the host's UTC offset. Aware is
+    necessary but not sufficient -- correctly *localised* is the real
+    requirement, and it cannot be verified from the value alone.
+
+    That is enforced upstream instead: ``governor_adapter.now_utc`` is the only
+    sanctioned clock read, and a test fails the build if ``.replace(tzinfo=``
+    appears anywhere in ``src/``.
+    """
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(
             f"{label} must be timezone-aware; naive datetimes are rejected, "
@@ -185,15 +297,23 @@ class AccountSnapshot:
     Built only by ``governor_adapter``. ``net_liq`` must already include open
     position P&L -- the adapter refuses to build a snapshot it cannot compute
     honestly rather than falling back to bare balance.
+
+    ``mll_floor`` is ``None`` when the tracked floor is missing, stale or
+    unparseable. That is a halt, never a default.
+
+    ``observed_trades`` is the count of real entries the adapter found in the
+    fill history since the session anchor, or ``None`` if it could not be
+    determined. It exists to catch a caller that forgot ``record_trade``.
     """
 
     net_liq: float
     balance: float
-    mll_floor: float
+    mll_floor: float | None
     open_position_size: int
     session_start_balance: float
     now: datetime
     kill_switch_active: bool = False
+    observed_trades: int | None = None
 
     def __post_init__(self) -> None:
         _require_aware(self.now, "AccountSnapshot.now")
@@ -206,10 +326,12 @@ class GovernorState:
     ``session_start_balance`` is the authoritative anchor for session P&L; the
     snapshot's copy is the adapter's observation and is cross-checked against
     this one.
+
+    ``session_start`` is what makes staleness detectable. It must equal the
+    18:00 ET boundary of the session the snapshot belongs to.
     """
 
     session_start_balance: float
-    session_high_balance: float
     trades_today: int = 0
     halted: bool = False
     halt_reason: str | None = None
@@ -285,21 +407,45 @@ def session_start_for(now: datetime, config: Config | None = None) -> datetime:
     return datetime.combine(previous_date, boundary, tzinfo=cfg.tz)
 
 
-def _session_clock_time(now: datetime, at: time, config: Config) -> datetime:
-    """Resolve a wall-clock ET time within the session that contains ``now``.
+def session_trading_date(now: datetime, config: Config | None = None) -> date:
+    """The calendar date a session belongs to.
 
-    A session opens at 18:00 ET on day D and runs to 18:00 ET on day D+1, so
-    every intraday time (09:30, 11:30, 15:55) falls on D+1.
+    A session opens 18:00 ET on day D and runs to 18:00 ET on day D+1, so its
+    trading date is D+1. Sunday 18:00 therefore belongs to Monday, and Friday
+    18:00 would belong to Saturday -- which the calendar correctly reports as
+    closed, because Globex is shut from Friday 17:00 to Sunday 18:00 ET.
     """
-    session_start = session_start_for(now, config)
-    target_date = session_start.date() + timedelta(days=1)
-    return datetime.combine(target_date, at, tzinfo=config.tz)
+    return session_start_for(now, config).date() + timedelta(days=1)
+
+
+def _session_clock_time(now: datetime, at: time, config: Config) -> datetime:
+    """Resolve a wall-clock ET time within the session that contains ``now``."""
+    return datetime.combine(session_trading_date(now, config), at, tzinfo=config.tz)
 
 
 def hard_flatten_at(now: datetime, config: Config | None = None) -> datetime:
-    """The 15:55 ET hard flatten for the session containing ``now``."""
+    """The hard flatten for the session containing ``now``.
+
+    Normally 15:55 ET. On an early-close date the firm's deadline moves to
+    15 minutes before the close, and we take our own margin on top of that, so
+    a 13:00 ET close gives a 12:30 flatten. The earlier of the two always wins.
+    """
     cfg = config or Config()
-    return _session_clock_time(now, cfg.hard_flatten_et, cfg)
+    trading_date = session_trading_date(now, cfg)
+    flatten_time = cfg.hard_flatten_et
+
+    if cfg.enforce_market_calendar:
+        day = classify(trading_date)
+        if day.close_et is not None:
+            close = datetime.combine(trading_date, day.close_et, tzinfo=cfg.tz)
+            firm_deadline = close - timedelta(minutes=cfg.firm_flat_margin_minutes)
+            ours = firm_deadline - timedelta(minutes=cfg.our_flat_margin_minutes)
+            # .time() drops the zone outright; .timetz().replace(tzinfo=None)
+            # would do the same thing while looking like the localisation bug
+            # that `.replace(tzinfo=...)` is banned for.
+            flatten_time = min(flatten_time, ours.time())
+
+    return datetime.combine(trading_date, flatten_time, tzinfo=cfg.tz)
 
 
 def entry_cutoff_at(now: datetime, config: Config | None = None) -> datetime:
@@ -324,8 +470,24 @@ def compute_session_pnl(snapshot: AccountSnapshot, state: GovernorState) -> floa
 
     Using realised P&L here would miss an open losing position -- exactly the
     exposure the Max Loss Limit is enforced against.
+
+    Meaningless unless ``state.session_start`` matches the snapshot's session.
+    ``evaluate`` checks that first and halts if it does not.
     """
     return snapshot.net_liq - state.session_start_balance
+
+
+def effective_trade_count(snapshot: AccountSnapshot, state: GovernorState) -> int:
+    """The trade count to budget against: the HIGHER of tracked and observed.
+
+    Taking the maximum is the conservative direction. If the caller forgot
+    ``record_trade``, the observed count is higher and we stop sooner; if the
+    fill history is incomplete, the tracked count is higher and we still stop
+    sooner. Only a number that is too LOW can let a third trade through.
+    """
+    if snapshot.observed_trades is None:
+        return state.trades_today
+    return max(state.trades_today, snapshot.observed_trades)
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +504,10 @@ def evaluate(
 
     Precedence is deliberate and ordered by severity:
 
+      0. State integrity -> FLATTEN_AND_HALT. Checked FIRST, because a stale
+         anchor or an unknown MLL floor makes every number below meaningless.
+         A trip-wire computed from a bad anchor is not a safety check, it is a
+         confident wrong answer.
       1. Trip-wires -> FLATTEN_AND_HALT (most account-ending first).
       2. An already-halted session -> re-assert the flatten if anything is
          open, otherwise refuse.
@@ -362,10 +528,42 @@ def evaluate(
     def refuse(code: str, detail: str) -> GovernorDecision:
         return decide(Action.REFUSE_ENTRY, code, detail)
 
+    # --- 0. State integrity ------------------------------------------------
+
+    # 0a. The session anchor must belong to the session we are evaluating.
+    #     If it does not, session_pnl measures from the wrong day: a session
+    #     that is really down $250 can read as up $150, and BOTH the loss limit
+    #     and the profit target silently stop working. This must therefore be
+    #     checked before any limit derived from session_pnl.
+    expected_session = session_start_for(snapshot.now, config)
+    if state.session_start is None:
+        return halt(
+            Reason.STALE_SESSION_ANCHOR,
+            f"no session anchor recorded; session P&L cannot be trusted "
+            f"(expected anchor {expected_session:%Y-%m-%d %H:%M %Z}). "
+            "Call roll_session before evaluate.",
+        )
+    if _utc(state.session_start) != _utc(expected_session):
+        return halt(
+            Reason.STALE_SESSION_ANCHOR,
+            f"anchor is {state.session_start:%Y-%m-%d %H:%M %Z} but this snapshot "
+            f"belongs to the session starting {expected_session:%Y-%m-%d %H:%M %Z}; "
+            f"the {session_pnl:,.2f} session P&L is measured from the wrong "
+            "session. Call roll_session before evaluate.",
+        )
+
+    # 0b. The MLL floor is the only permanent-failure guard. Unknown is a halt.
+    if snapshot.mll_floor is None:
+        return halt(
+            Reason.MLL_STATE_UNAVAILABLE,
+            "the trailing MLL floor is unknown (state missing, stale or "
+            "unparseable); refusing to trade without the one guard that "
+            "protects against permanent failure",
+        )
+
     # --- 1. Trip-wires -----------------------------------------------------
 
-    # 1a. Trailing MLL floor. The only permanent-failure rule, so it is checked
-    #     first and against net liq including open P&L.
+    # 1a. Trailing MLL floor, against net liq including open P&L.
     headroom = snapshot.net_liq - snapshot.mll_floor
     if headroom <= config.floor_buffer:
         return halt(
@@ -389,8 +587,7 @@ def evaluate(
         return halt(
             Reason.HARD_FLATTEN_TIME,
             f"{snapshot.now.astimezone(config.tz):%Y-%m-%d %H:%M:%S %Z} reached "
-            f"the {config.hard_flatten_et:%H:%M} ET hard flatten "
-            f"({flatten_at:%Y-%m-%d %H:%M:%S %Z})",
+            f"the hard flatten ({flatten_at:%Y-%m-%d %H:%M:%S %Z})",
         )
 
     # 1d. Session profit target.
@@ -421,16 +618,26 @@ def evaluate(
     if snapshot.kill_switch_active:
         return refuse(Reason.KILL_SWITCH, "kill switch file is present")
 
-    # 3b. State unknown after a restart. Never assume flat (constraint 5).
+    # 3b. Is there a session at all today?
+    if config.enforce_market_calendar:
+        trading_date = session_trading_date(snapshot.now, config)
+        day = classify(trading_date)
+        if not day.tradable:
+            return refuse(
+                Reason.MARKET_CLOSED,
+                f"{trading_date} is not a trading day ({day.label})",
+            )
+
+    # 3c. State unknown after a restart. Never assume flat (constraint 5).
     if state.last_reconcile is None:
         return refuse(
             Reason.UNRECONCILED,
             "no reconcile recorded; positions and working orders are unknown",
         )
 
-    # 3c. The governor's session anchor disagrees with the adapter's. Every
-    #     daily limit is measured from that anchor, so a mismatch means the
-    #     limits cannot be trusted.
+    # 3d. The governor's session anchor disagrees with the adapter's. Note this
+    #     is a DIFFERENT failure from 0a: two stale anchors agree with each
+    #     other, which is why 0a exists as well.
     if config.enforce_anchor_consistency:
         drift = abs(state.session_start_balance - snapshot.session_start_balance)
         if drift > config.anchor_tolerance:
@@ -441,32 +648,48 @@ def evaluate(
                 f"by {drift:,.2f}",
             )
 
-    # 3d. Already in the market.
+    # 3e. The tracked trade count disagrees with observed fills, which means
+    #     record_trade was missed. We budget against the higher number anyway
+    #     (see effective_trade_count), but the disagreement is reported rather
+    #     than quietly absorbed.
+    if snapshot.observed_trades is not None and (
+        snapshot.observed_trades > state.trades_today
+    ):
+        return refuse(
+            Reason.TRADE_COUNT_DRIFT,
+            f"{snapshot.observed_trades} entries observed in the fill history "
+            f"but state records {state.trades_today}; record_trade was missed. "
+            f"Budgeting against {snapshot.observed_trades}",
+        )
+
+    # 3f. Already in the market.
     if snapshot.open_position_size != 0:
         return refuse(
             Reason.POSITION_ALREADY_OPEN,
             f"position size is {snapshot.open_position_size}, not flat",
         )
 
-    # 3e. Trade budget spent.
-    if state.trades_today >= config.max_trades_per_session:
+    # 3g. Trade budget spent, measured conservatively.
+    taken = effective_trade_count(snapshot, state)
+    if taken >= config.max_trades_per_session:
         return refuse(
             Reason.TRADE_COUNT_EXHAUSTED,
-            f"{state.trades_today} trades taken; limit is "
+            f"{taken} trades taken; limit is "
             f"{config.max_trades_per_session} per session",
         )
 
-    # 3f. Too close to the hard flatten to open anything.
+    # 3h. Too close to the hard flatten to open anything.
     remaining = _utc(flatten_at) - _utc(snapshot.now)
     lockout = timedelta(minutes=config.entry_lockout_minutes)
     if remaining < lockout:
         return refuse(
             Reason.NEAR_HARD_FLATTEN,
-            f"{remaining} remains before the {config.hard_flatten_et:%H:%M} ET "
-            f"hard flatten; lockout is {config.entry_lockout_minutes} minutes",
+            f"{remaining} remains before the hard flatten at "
+            f"{flatten_at:%H:%M} ET; lockout is "
+            f"{config.entry_lockout_minutes} minutes",
         )
 
-    # 3g. Past the strategy's entry cutoff. Inclusive: at exactly 11:30:00 the
+    # 3i. Past the strategy's entry cutoff. Inclusive: at exactly 11:30:00 the
     #     cutoff is already in force. Entering on the cutoff instant is the
     #     riskier reading, so it is refused.
     cutoff = entry_cutoff_at(snapshot.now, config)
@@ -477,7 +700,7 @@ def evaluate(
             f"{config.entry_cutoff_et:%H:%M} ET entry cutoff",
         )
 
-    # 3h. Before the regular session opens. Keeps entries inside 09:30-11:30 ET
+    # 3j. Before the regular session opens. Keeps entries inside 09:30-11:30 ET
     #     and makes an overnight position structurally impossible.
     if config.enforce_rth_open:
         opens = rth_open_at(snapshot.now, config)
@@ -518,11 +741,10 @@ def roll_session(
     as phantom session P&L the moment the session rolled.
     """
     current = session_start_for(snapshot.now, config)
-    if state.session_start == current:
+    if state.session_start is not None and _utc(state.session_start) == _utc(current):
         return state
     return GovernorState(
         session_start_balance=snapshot.net_liq,
-        session_high_balance=snapshot.net_liq,
         trades_today=0,
         halted=False,
         halt_reason=None,
@@ -534,15 +756,6 @@ def roll_session(
 def record_trade(state: GovernorState) -> GovernorState:
     """Return state with the session trade counter incremented."""
     return replace(state, trades_today=state.trades_today + 1)
-
-
-def update_high_balance(
-    snapshot: AccountSnapshot, state: GovernorState
-) -> GovernorState:
-    """Track the session high-water mark on net liq."""
-    if snapshot.net_liq <= state.session_high_balance:
-        return state
-    return replace(state, session_high_balance=snapshot.net_liq)
 
 
 def apply_decision(

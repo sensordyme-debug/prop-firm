@@ -268,21 +268,96 @@ def test_mll_floor_accepts_an_explicit_default(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def _src_dir():
+    import pathlib
+
+    return pathlib.Path(__file__).parent.parent / "src"
+
+
+def _parse(path):
+    import ast
+
+    return ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
 def test_governor_module_imports_no_sdk():
     """The purity contract, enforced rather than documented.
 
     If governor.py ever grows an SDK import it stops being unit-testable
     without credentials, and the trip-wires stop being provable offline.
-    """
-    import pathlib
 
-    source = (pathlib.Path(__file__).parent.parent / "src" / "governor.py").read_text(
-        encoding="utf-8"
-    )
+    Checked against the AST, not the text: a substring scan also matches
+    prose, and a docstring that *documents* an anti-pattern is not a use of
+    it. A test that cannot tell those apart trains people to ignore it.
+    """
+    import ast
+
+    tree = _parse(_src_dir() / "governor.py")
+
+    imported: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.append(node.module)
+        elif isinstance(node, ast.Import):
+            imported += [a.name for a in node.names]
     for forbidden in ("project_x_py", "aiohttp", "httpx", "requests"):
-        assert forbidden not in source, f"governor.py must not import {forbidden}"
-    for forbidden in ("datetime.now(", "time.time(", ".utcnow("):
-        assert forbidden not in source, f"governor.py must not read the clock: {forbidden}"
+        assert not any(forbidden in name for name in imported), (
+            f"governor.py must not import {forbidden}"
+        )
+
+    clock_calls = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in ("now", "utcnow", "today"):
+            clock_calls.append(f"line {node.lineno}: .{func.attr}()")
+    assert not clock_calls, (
+        "governor.py must not read the clock; `now` arrives on the snapshot. "
+        f"Found {clock_calls}"
+    )
+
+
+def test_no_source_file_localises_with_replace_tzinfo():
+    """Ban ``.replace(tzinfo=...)`` across src/.
+
+    ``datetime.now().replace(tzinfo=ET)`` produces a datetime that is aware,
+    passes every ``_require_aware`` check, and is silently wrong by the host's
+    UTC offset -- on a machine not set to ET, every session boundary shifts by
+    hours with no error anywhere.
+
+    Aware is necessary but not sufficient; correctly localised is the real
+    requirement, and it cannot be checked from the value. So it is enforced at
+    the source level instead: build instants with ``now_utc()`` and convert
+    with ``astimezone``, which cannot express the bug.
+    """
+    import ast
+
+    offenders = []
+    for path in sorted(_src_dir().glob("*.py")):
+        for node in ast.walk(_parse(path)):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not (isinstance(func, ast.Attribute) and func.attr == "replace"):
+                continue
+            if any(kw.arg == "tzinfo" for kw in node.keywords):
+                offenders.append(f"{path.name}:{node.lineno}")
+    assert not offenders, (
+        "use now_utc() and astimezone() instead of .replace(tzinfo=...): "
+        f"{offenders}"
+    )
+
+
+def test_adapter_clock_reads_utc_not_local_time():
+    """now_utc must return a UTC instant, not a locally-stamped one."""
+    from datetime import timezone
+
+    from governor_adapter import now_utc
+
+    value = now_utc()
+    assert value.tzinfo is not None
+    assert value.utcoffset() == timezone.utc.utcoffset(None)
 
 
 def test_connection_test_never_imports_an_order_capable_object():
