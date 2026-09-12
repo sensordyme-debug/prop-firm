@@ -315,11 +315,16 @@ def _gap_issues(
     """
     issues: list[DataIssue] = []
     step = timedelta(minutes=interval_minutes)
-    tolerance = step + timedelta(minutes=MAINTENANCE_BREAK_MINUTES + 5)
+    # Allow half a bar of jitter, nothing more. A blanket tolerance wide enough
+    # to cover the nightly break would also swallow an hour-long hole in the
+    # middle of the session, which is exactly the thing worth knowing about.
+    jitter = step + step / 2
 
     for earlier, later in zip(bars, bars[1:]):
         delta = later.ts - earlier.ts
-        if delta <= tolerance:
+        if delta <= jitter:
+            continue
+        if _spans_maintenance_break(earlier.ts, later.ts):
             continue
         if expect_calendar and _spans_a_closure(earlier.ts, later.ts):
             continue
@@ -330,6 +335,24 @@ def _gap_issues(
             earlier.ts,
         ))
     return issues
+
+
+def _spans_maintenance_break(start: datetime, end: datetime) -> bool:
+    """Does this gap actually cover the 17:00-18:00 ET maintenance window?
+
+    Checked against the clock rather than allowed as a blanket tolerance, so a
+    gap of the same LENGTH at 10:00 is still reported.
+    """
+    et = ZoneInfo("America/New_York")
+    probe = start.astimezone(et).date()
+    last = end.astimezone(et).date()
+    while probe <= last:
+        window_start = datetime(probe.year, probe.month, probe.day, 17, 0, tzinfo=et)
+        window_end = window_start + timedelta(minutes=MAINTENANCE_BREAK_MINUTES)
+        if start < window_end and end > window_start:
+            return True
+        probe += timedelta(days=1)
+    return False
 
 
 def _spans_a_closure(start: datetime, end: datetime) -> bool:

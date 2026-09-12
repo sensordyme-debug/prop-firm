@@ -479,3 +479,26 @@ def test_module_imports_without_the_sdk():
     assert not any("project_x_py" in n for n in names), (
         "the SDK import must stay inside probe() so this module loads offline"
     )
+
+
+def test_a_short_hole_during_the_session_is_still_flagged():
+    """A 35-minute hole at 10:00 ET is missing data, not the nightly break.
+
+    Guards against a blanket tolerance wide enough to cover the maintenance
+    window: that would also swallow holes of the same length mid-session.
+    """
+    issues = validate(utc_bars(0, 5, 10, 45, 50), interval_minutes=5)
+    gaps = [i for i in issues if i.code == "UNEXPLAINED_GAP"]
+    assert len(gaps) == 1
+    assert "35m" in str(gaps[0]) or "0h 35m" in str(gaps[0])
+
+
+def test_a_gap_of_break_length_at_the_wrong_time_of_day_is_flagged():
+    """Same duration as the maintenance break, but at 10:00 ET."""
+    issues = validate(utc_bars(0, 5, 70, 75), interval_minutes=5)
+    assert [i for i in issues if i.code == "UNEXPLAINED_GAP"]
+
+
+def test_one_missing_bar_is_flagged():
+    issues = validate(utc_bars(0, 5, 15, 20), interval_minutes=5)
+    assert [i for i in issues if i.code == "UNEXPLAINED_GAP"]

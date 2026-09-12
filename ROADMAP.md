@@ -3,9 +3,9 @@
 Stages are gated. **Do not start a stage until the previous gate is met.** The
 gates exist because each one is a documented way these accounts die.
 
-Current state: governor, market calendar, MLL tracker, connection test and the
-backtest harness are built and unit-tested. No code has ever touched a live
-account, and no strategy exists yet.
+Current state: governor, market calendar, MLL tracker, connection test, the
+backtest harness and the data layer are built and unit-tested. No code has ever
+touched a live account, and no strategy exists yet.
 
 ---
 
@@ -39,6 +39,17 @@ actually returns. Guesses here shift every opening range by one bar.
 Run `python -m src.data --probe MNQ`.
 
 **Gate:** you know the earliest available bar and the total 5-minute history.
+
+`src/data.py` is built and tested (46 tests, all offline). It loads and
+validates vendor CSVs, caches bars with a sidecar recording their timestamp
+convention, and feeds `BarSeries` straight into the harness. `--probe` walks
+increasing history windows and reports what actually comes back, plus evidence
+for the Stage 1 questions (are timestamps offset-aware, what are the observed
+bar spacings, where does the first bar of a session fall in ET).
+
+Only the probe itself needs the key — the SDK import is lazy. Everything else
+runs today, so a vendor CSV can be validated and backtested before Stage 0
+completes.
 
 - Years of depth → no external data is ever needed.
 - ~90 days → source CME history from a vendor (Databento, FirstRate) as CSV into
