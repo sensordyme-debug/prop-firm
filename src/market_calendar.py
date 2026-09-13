@@ -162,7 +162,23 @@ def classify(trading_date: date) -> SessionDay:
 
 
 def is_open(trading_date: date) -> bool:
+    """Will WE trade this date? Holiday half-days are excluded by policy."""
     return classify(trading_date).tradable
+
+
+def market_is_open(trading_date: date) -> bool:
+    """Is the MARKET open, regardless of whether we choose to trade?
+
+    Deliberately different from :func:`is_open`. We stand aside on holiday
+    half-days, but the exchange is still trading, and some questions depend on
+    what the exchange does rather than on our policy -- contract expiry moving
+    to the previous business day, for one. Using ``is_open`` there would push
+    an expiry off a day the market was actually open.
+    """
+    return classify(trading_date).status in (
+        DayStatus.OPEN,
+        DayStatus.HOLIDAY_HALF_DAY,
+    )
 
 
 def previous_trading_date(trading_date: date, limit: int = 10) -> date | None:

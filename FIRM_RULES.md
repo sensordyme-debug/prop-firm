@@ -255,6 +255,53 @@ the strategy, don't run it at another firm.
   If populated it is the broker's own net liquidation and is strictly better than
   our `balance + unrealised P&L` derivation. Unknown until the feed is live.
 
+## Contract months and the quarterly roll
+
+| Item | Value | Status |
+|---|---|---|
+| Contract months | March (H), June (M), September (U), December (Z) | VERIFIED |
+| Expiry | **third Friday** of the contract month | VERIFIED |
+| Settlement | cash, to the index's Special Opening Quotation | VERIFIED |
+| Roll date | **the Monday prior to the third Friday** | cross-checked, not CME-verified |
+
+2026 schedule, computed and unit-tested in `src/contracts.py`:
+
+| Quarter | Roll (Mon) | Expiry (3rd Fri) | Symbol |
+|---|---|---|---|
+| Mar | 2026-03-16 | 2026-03-20 | MNQH26 |
+| Jun | 2026-06-15 | 2026-06-19 | MNQM26 |
+| Sep | 2026-09-14 | 2026-09-18 | MNQU26 |
+| Dec | 2026-12-14 | 2026-12-18 | MNQZ26 |
+
+**The roll is NOT "eight days before expiry" and NOT "the second Thursday."**
+Both are widely repeated and both give the wrong day. A test pins the
+difference so nobody can "correct" it back to a plausible mistake. CME's own
+roll-dates page timed out, so `ROLL_CONVENTION_CME_VERIFIED = False`.
+
+Why it matters, in two unrelated places:
+
+- **Live.** After the roll date, volume and open interest have moved to the
+  next quarter. Trading the stale front month means a thin book and bad fills
+  on an account where a few ticks is the whole edge. Use
+  `contracts.front_month(date).symbol()`.
+- **Backtest.** Bar history for a root symbol splices contracts together. The
+  next quarter trades at a different price — carry and dividends, not
+  sentiment — so a continuous series shows a step at every roll, and a
+  breakout strategy reads it as a signal. It is a phantom: nobody could have
+  traded it. `data.validate` raises `SPANS_CONTRACT_ROLL` whenever a series
+  crosses one.
+
+**We do not trade expiry day.** MNQ settles to the OPENING quote, so the
+session that decides the contract is over before our 09:30 window begins and
+the rest is an artefact. Four sessions a year, refused by
+`Reason.CONTRACT_EXPIRY` — the same trade made for holiday dates.
+
+Note June 2026: the third Friday is also Juneteenth. We abstain from that date
+as a holiday, but the exchange is open for a shortened session, so settlement
+still occurs then and expiry does **not** move. `market_calendar.is_open`
+("will we trade it") and `market_calendar.market_is_open` ("is the exchange
+open") are deliberately different functions for this reason.
+
 ## Contract specs — MNQ
 
 | Item | Value |

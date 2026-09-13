@@ -72,6 +72,7 @@ from typing import Final
 from zoneinfo import ZoneInfo
 
 from compliance import validate_daily_target
+from contracts import front_month, is_expiry_date
 from market_calendar import DayStatus, classify
 
 ET: Final[ZoneInfo] = ZoneInfo("America/New_York")
@@ -129,6 +130,7 @@ class Reason:
     SESSION_HALTED = "SESSION_HALTED"
     KILL_SWITCH = "KILL_SWITCH"
     MARKET_CLOSED = "MARKET_CLOSED"
+    CONTRACT_EXPIRY = "CONTRACT_EXPIRY"
     UNRECONCILED = "UNRECONCILED"
     SESSION_ANCHOR_MISMATCH = "SESSION_ANCHOR_MISMATCH"
     TRADE_COUNT_DRIFT = "TRADE_COUNT_DRIFT"
@@ -185,6 +187,7 @@ class Config:
     enforce_anchor_consistency: bool = True
     enforce_market_calendar: bool = True
     enforce_consistency_ceiling: bool = True
+    enforce_contract_expiry: bool = True
     anchor_tolerance: float = 0.01
 
     tz: ZoneInfo = field(default_factory=lambda: ET)
@@ -617,7 +620,21 @@ def evaluate(
                 f"{trading_date} is not a trading day ({day.label})",
             )
 
-    # 3c. State unknown after a restart. Never assume flat (constraint 5).
+    # 3c. Expiry day. MNQ settles to the index's OPENING quote on the third
+    #     Friday, so the session that decides the contract is over before our
+    #     09:30 window begins and what remains is an artefact. Four sessions a
+    #     year, and it removes the need to reason about any of it.
+    if config.enforce_contract_expiry:
+        trading_date = session_trading_date(snapshot.now, config)
+        if is_expiry_date(trading_date):
+            return refuse(
+                Reason.CONTRACT_EXPIRY,
+                f"{trading_date} is a quarterly expiry; MNQ cash-settles to the "
+                f"opening quote and the front month is now "
+                f"{front_month(trading_date).symbol()}",
+            )
+
+    # 3d. State unknown after a restart. Never assume flat (constraint 5).
     if state.last_reconcile is None:
         return refuse(
             Reason.UNRECONCILED,

@@ -437,3 +437,43 @@ def test_the_default_daily_target_is_far_inside_the_ceiling():
 def test_the_consistency_ceiling_guard_can_be_disabled():
     assert cfg(daily_profit_target=2_000.0,
                enforce_consistency_ceiling=False).daily_profit_target == 2_000.0
+
+
+# ===========================================================================
+# Contract expiry
+# ===========================================================================
+
+
+def test_quarterly_expiry_day_refuses_entry():
+    """MNQ settles to the OPENING quote, so the deciding session is already
+    over before our 09:30 window begins."""
+    d = decide(snap(now=datetime(2026, 9, 18, 10, 0, tzinfo=ET)))
+    assert d.action is Action.REFUSE_ENTRY
+    assert d.code == Reason.CONTRACT_EXPIRY
+    assert "MNQZ26" in d.reason, "and it names the contract that now leads"
+
+
+def test_the_day_before_expiry_trades_normally():
+    assert decide(snap(now=datetime(2026, 9, 17, 10, 0, tzinfo=ET))).action is (
+        Action.CONTINUE
+    )
+
+
+def test_roll_day_itself_is_tradable():
+    """Rolling is about WHICH contract, not whether to trade at all."""
+    assert decide(snap(now=datetime(2026, 9, 14, 10, 0, tzinfo=ET))).action is (
+        Action.CONTINUE
+    )
+
+
+def test_every_2026_quarterly_expiry_is_refused():
+    for day in (date(2026, 3, 20), date(2026, 6, 19), date(2026, 9, 18),
+                date(2026, 12, 18)):
+        d = decide(snap(now=datetime(day.year, day.month, day.day, 10, 0, tzinfo=ET)))
+        assert d.action is not Action.CONTINUE, f"{day} must not trade"
+
+
+def test_the_expiry_guard_can_be_disabled():
+    d = decide(snap(now=datetime(2026, 9, 18, 10, 0, tzinfo=ET)),
+               config=cfg(enforce_contract_expiry=False))
+    assert d.code != Reason.CONTRACT_EXPIRY

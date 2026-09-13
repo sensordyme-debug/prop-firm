@@ -56,6 +56,7 @@ if str(_SRC) not in sys.path:  # so `python -m src.data` finds its siblings
     sys.path.insert(0, str(_SRC))
 
 from backtest import Bar, BarSeries, BarTimestamp  # noqa: E402
+from contracts import front_month, rolls_between  # noqa: E402
 from market_calendar import classify, is_open  # noqa: E402
 
 __all__ = [
@@ -301,6 +302,37 @@ def validate(
             ))
 
     issues.extend(_gap_issues(bars, interval_minutes, expect_calendar))
+    issues.extend(_roll_issues(bars))
+    return issues
+
+
+def _roll_issues(bars: Sequence[Bar]) -> list[DataIssue]:
+    """Warn when a series spans a quarterly roll.
+
+    Bar history for a root symbol splices contracts together. The next quarter
+    trades at a different price from the expiring one -- carry and dividends,
+    not sentiment -- so a continuous series shows a step change at the join.
+    A breakout strategy reads that step as a signal, and it is a phantom:
+    nobody could have traded it, because it is two instruments printed side by
+    side.
+
+    This cannot be fixed here, only reported. Back-adjusting a series is a
+    decision with its own trade-offs, and making it silently inside a
+    validator would be the wrong place for it.
+    """
+    if len(bars) < 2:
+        return []
+    first = bars[0].ts.astimezone(ZoneInfo("America/New_York")).date()
+    last = bars[-1].ts.astimezone(ZoneInfo("America/New_York")).date()
+    issues: list[DataIssue] = []
+    for roll in rolls_between(first, last):
+        issues.append(DataIssue(
+            Severity.WARNING, "SPANS_CONTRACT_ROLL",
+            f"the series crosses the {roll} quarterly roll "
+            f"(front month becomes {front_month(roll).symbol()}). If these bars "
+            "are a spliced continuous series, the price step at the join is not "
+            "a market move and a breakout strategy will trade it.",
+        ))
     return issues
 
 

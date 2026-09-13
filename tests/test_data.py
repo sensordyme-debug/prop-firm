@@ -502,3 +502,38 @@ def test_a_gap_of_break_length_at_the_wrong_time_of_day_is_flagged():
 def test_one_missing_bar_is_flagged():
     issues = validate(utc_bars(0, 5, 15, 20), interval_minutes=5)
     assert [i for i in issues if i.code == "UNEXPLAINED_GAP"]
+
+
+def test_a_series_spanning_a_quarterly_roll_is_flagged():
+    """A spliced continuous series has a price step that is not a market move."""
+    before = datetime(2026, 9, 11, 14, 0, tzinfo=UTC)
+    after = datetime(2026, 9, 16, 14, 0, tzinfo=UTC)
+    bars, _ = parse_rows(rows(before.isoformat(), after.isoformat()),
+                         source_timezone=UTC)
+    issues = validate(bars, interval_minutes=5)
+    roll = [i for i in issues if i.code == "SPANS_CONTRACT_ROLL"]
+    assert len(roll) == 1
+    assert "2026-09-14" in roll[0].message
+    assert "MNQZ26" in roll[0].message
+    assert roll[0].severity is Severity.WARNING, "reportable, not fatal"
+
+
+def test_a_series_inside_one_contract_is_not_flagged():
+    quiet = [
+        (datetime(2026, 9, 16, 14, 0, tzinfo=UTC) + timedelta(minutes=5 * i)).isoformat()
+        for i in range(4)
+    ]
+    bars, _ = parse_rows(rows(*quiet), source_timezone=UTC)
+    assert [i for i in validate(bars, interval_minutes=5)
+            if i.code == "SPANS_CONTRACT_ROLL"] == []
+
+
+def test_a_multi_quarter_series_flags_every_roll_it_crosses():
+    bars, _ = parse_rows(
+        rows(datetime(2026, 1, 5, 14, 0, tzinfo=UTC).isoformat(),
+             datetime(2026, 12, 21, 14, 0, tzinfo=UTC).isoformat()),
+        source_timezone=UTC,
+    )
+    issues = [i for i in validate(bars, interval_minutes=5)
+              if i.code == "SPANS_CONTRACT_ROLL"]
+    assert len(issues) == 4, "one per quarter"
