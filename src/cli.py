@@ -87,6 +87,120 @@ def cmd_config(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_config_check(_args: argparse.Namespace) -> int:
+    """READ-ONLY. Reports presence, never values."""
+    from config import ConfigError, load_config
+
+    print("CONFIG CHECK  [READ-ONLY]")
+    print("=" * 46)
+    try:
+        cfg = load_config()
+    except ConfigError as exc:
+        print("  CONFIGURATION INVALID")
+        print(f"    {exc}")
+        return 1
+
+    red = cfg.redacted()
+    print(f"  API KEY            {red['api_key']}")
+    print(f"  USERNAME           {red['username']}")
+    print(f"  ACCOUNT            {cfg.account_name or 'ABSENT (uses default)'}")
+    print(f"  DRY RUN            {cfg.dry_run}")
+    print(f"  LIVE TRADING       "
+          f"{'ENABLED' if cfg.live_trading_enabled else 'DISABLED'}")
+    print(f"  EXECUTION MODE     {cfg.execution_mode.value}")
+    print(f"  MAY TRANSMIT       {cfg.execution_mode.may_transmit}")
+    print()
+    print(f"  SYMBOL             {cfg.symbol}")
+    print(f"  POSITION SIZE      {cfg.position_size}")
+    print(f"  RISK PER TRADE     ${cfg.risk_per_trade:,.2f}")
+    print(f"  DAILY MAX LOSS     ${cfg.daily_max_loss:,.2f}")
+    print(f"  DAILY TARGET       ${cfg.daily_profit_target:,.2f}")
+    print(f"  FLOOR BUFFER       ${cfg.floor_buffer:,.2f}")
+    print(f"  TIMEZONE           {cfg.timezone}")
+    print()
+    print("  The API key value is never printed, logged or returned.")
+    if not cfg.has_credentials:
+        print("  No usable credentials: research works, API commands do not.")
+        return 0
+    return 0
+
+
+def cmd_readiness(args: argparse.Namespace) -> int:
+    """READ-ONLY. Never reports ready merely because a key exists."""
+    from readiness import assess
+
+    report = assess(run_tests=not args.skip_tests)
+    print(report.render())
+    if args.json:
+        import json as _json
+
+        Path(args.json).write_text(_json.dumps(report.to_dict(), indent=2),
+                                   encoding="utf-8")
+        print(f"Machine-readable report written to {args.json}")
+    return 0 if report.classification == "API-KEY-READY" else 1
+
+
+def cmd_reconcile(_args: argparse.Namespace) -> int:
+    """READ-ONLY. Compares broker truth against local state."""
+    from config import load_config
+    from session_state import load_state
+
+    cfg = load_config()
+    print("RECONCILE  [READ-ONLY]")
+    print("=" * 46)
+    local = load_state()
+    if local is None:
+        print("  local state : none on disk")
+    else:
+        print(local.render())
+    print()
+    if not cfg.has_credentials:
+        print("  Broker state UNAVAILABLE: no credentials configured.")
+        print("  Reconciliation compares LOCAL belief against BROKER truth, so")
+        print("  it cannot run one-sided. Add credentials and re-run.")
+        return 1
+    print("  Live reconciliation needs a connection; run connection-test first.")
+    print("  Nothing is assumed about positions in the meantime.")
+    return 1
+
+
+def cmd_research(args: argparse.Namespace) -> int:
+    """READ-ONLY. Lists the strategy catalogue and the research pipeline."""
+    import strategies
+
+    print("RESEARCH CATALOGUE  [READ-ONLY]")
+    print("=" * 66)
+    available = strategies.available_strategies()
+    declared = strategies.unavailable_strategies()
+
+    print()
+    print(f"TESTABLE ON 5m OHLCV ({len(available)})")
+    for name, meta in sorted(available.items()):
+        print()
+        print(meta.describe())
+
+    print()
+    print(f"DECLARED, NOT IMPLEMENTED ({len(declared)})")
+    print("These need data we do not have. They are NOT run against")
+    print("approximated inputs, because that would produce numbers.")
+    for name, meta in sorted(declared.items()):
+        missing = ", ".join(r.value for r in meta.missing_requirements)
+        print(f"  {name:<30s} needs {missing}")
+        print(f"      {meta.unavailable_reason}")
+
+    print()
+    print("PIPELINE (each stage can reject a candidate)")
+    for stage in ("DATA VALIDATION", "BASELINE BACKTEST", "COST STRESS",
+                  "IN-SAMPLE / OUT-OF-SAMPLE", "WALK-FORWARD", "MONTE CARLO",
+                  "PARAMETER ROBUSTNESS", "REGIME ANALYSIS",
+                  "TOPSTEP CONSTRAINTS", "CROSS-STRATEGY COMPARISON"):
+        print(f"  -> {stage}")
+    print()
+    print("No strategy has been run on real data. NONE IS VALIDATED.")
+    print("Requires ROADMAP Stage 1 and 2 first.")
+    return 0
+
+
 def cmd_connection_test(_args: argparse.Namespace) -> int:
     import connection_test
 
@@ -196,13 +310,12 @@ def cmd_dry_run(_args: argparse.Namespace) -> int:
         print("  No credentials configured, so there is no market data to")
         print("  consume. Complete ROADMAP Stage 0 and Stage 1 first.")
         return 1
-    print("  The event-driven dry-run runtime is NOT YET IMPLEMENTED.")
-    print("  What exists today: the read-only adapter, reconciliation, the")
-    print("  governor, and the strategy. What is missing is the loop that")
-    print("  joins them against a live feed.")
+    print("  The runtime is implemented and CANNOT transmit: its broker has")
+    print("  no order method at all. It needs a live market-data feed to")
+    print("  consume, which requires credentials and ROADMAP Stage 1.")
     print()
-    print("  Until then, `connection-test` proves the read path and")
-    print("  `backtest` exercises strategy + governor together.")
+    print("  Offline, `backtest` drives the identical pipeline (same strategy,")
+    print("  same governor, same intent model) over historical bars.")
     return 1
 
 
@@ -230,6 +343,14 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--risk", type=float, default=80.0)
 
     sub.add_parser("config", help="print the effective configuration")
+    sub.add_parser("config-check", help="[READ-ONLY] credential presence only")
+    sub.add_parser("reconcile", help="[READ-ONLY] compare local state to broker")
+    sub.add_parser("research", help="[READ-ONLY] strategy catalogue and pipeline")
+
+    p_ready = sub.add_parser("readiness", help="[READ-ONLY] final safety gate")
+    p_ready.add_argument("--skip-tests", action="store_true",
+                         help="do not run the suite (faster, weaker)")
+    p_ready.add_argument("--json", help="also write the report here")
     sub.add_parser("connection-test", help="read-only API diagnostic")
     sub.add_parser("compliance", help="Combine and payout status")
     sub.add_parser("dry-run", help="decide against live data, transmit nothing")
@@ -261,6 +382,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     handlers = {
         "config": cmd_config,
+        "config-check": cmd_config_check,
+        "readiness": cmd_readiness,
+        "reconcile": cmd_reconcile,
+        "research": cmd_research,
         "connection-test": cmd_connection_test,
         "data": cmd_data,
         "backtest": cmd_backtest,

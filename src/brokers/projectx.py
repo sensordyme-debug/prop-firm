@@ -28,7 +28,7 @@ WHAT THIS TRANSLATES, AND WHY EACH ONE MATTERS
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from execution.broker import ContractSpec, MarketDataBroker
@@ -116,7 +116,7 @@ class ProjectXReadOnlyBroker(MarketDataBroker):
         try:
             self._client = await self._make_client()
             await self._client.authenticate()
-        except Exception as exc:  # noqa: BLE001 - re-raised as our taxonomy
+        except Exception as exc:
             self._authenticated = False
             raise classify_broker_error(exc) from exc
 
@@ -157,7 +157,7 @@ class ProjectXReadOnlyBroker(MarketDataBroker):
         client = self._require_session()
         try:
             account = client.get_account_info()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise classify_broker_error(exc) from exc
         if account is None:
             raise BrokerError("account info unavailable")
@@ -169,14 +169,14 @@ class ProjectXReadOnlyBroker(MarketDataBroker):
             can_trade=bool(account.canTrade),
             is_simulated=bool(account.simulated),
             net_liquidation=None,  # derived by the caller; never guessed here
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
         )
 
     async def get_positions(self) -> list[Position]:
         client = self._require_session()
         try:
             raw = await client.search_open_positions()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise classify_broker_error(exc) from exc
 
         positions: list[Position] = []
@@ -206,9 +206,9 @@ class ProjectXReadOnlyBroker(MarketDataBroker):
         except AttributeError:
             try:
                 raw = await client.get_orders()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 raise classify_broker_error(exc) from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise classify_broker_error(exc) from exc
 
         orders: list[WorkingOrder] = []
@@ -239,7 +239,7 @@ class ProjectXReadOnlyBroker(MarketDataBroker):
         client = self._require_session()
         try:
             instrument = await client.get_instrument(symbol)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise classify_broker_error(exc) from exc
         if instrument is None:
             raise BrokerError(f"no contract resolved for {symbol!r}")
@@ -271,7 +271,7 @@ class ProjectXReadOnlyBroker(MarketDataBroker):
         client = self._require_session()
         try:
             frame = await client.get_bars(symbol, days=days, interval=interval_minutes)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             raise classify_broker_error(exc) from exc
         if frame is None or len(frame) == 0:
             return []

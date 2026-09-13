@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
-from datetime import datetime, time, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -25,9 +25,9 @@ from execution.models import (
     OrderIntent,
     OrderState,
     OrderStateError,
+    OrderType,
     Side,
     WorkingOrder,
-    OrderType,
     transition,
 )
 
@@ -46,7 +46,7 @@ def test_execution_capability_cannot_be_granted():
 
 
 def test_capability_refuses_unless_every_precondition_holds():
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     all_true = dict(
         credentials_valid=True, account_identified=True,
         reconciliation_passed=True, market_data_fresh=True,
@@ -260,22 +260,52 @@ def test_account_state_redaction_omits_the_name():
     assert state.redacted()["account_id"] == 7
 
 
-def test_no_source_file_logs_the_api_key_value():
-    """Guards against f-string interpolation of a credential into output."""
+def test_no_source_file_prints_a_raw_credential_source():
+    """Static guard: no print may read the RAW credential.
+
+    Narrowed from a substring scan on "api_key", which flagged
+    ``redacted()['api_key']`` -- a value that is ``<set>`` by construction. A
+    check that fires on safe code gets suppressed, and a suppressed check
+    protects nothing. So this targets the raw sources specifically:
+    ``cfg.api_key``, ``config.api_key``, and direct environment reads.
+
+    The behavioural test below is the stronger of the two.
+    """
+    raw_sources = (
+        "cfg.api_key", "config.api_key", "self.api_key",
+        'environ["PROJECT_X_API_KEY"]', "environ.get(\"PROJECT_X_API_KEY\")",
+    )
     offenders: list[str] = []
     for path in sorted(SRC.rglob("*.py")):
-        text = path.read_text(encoding="utf-8")
-        for lineno, line in enumerate(text.splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith("#"):
+        for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if line.strip().startswith("#"):
                 continue
-            if "print(" in line and any(
-                token in line for token in ("api_key", "apiKey", "PROJECT_X_API_KEY")
-            ):
-                # Printing a LENGTH or a <set> marker is fine; the value is not.
-                if "len(" not in line and "<set>" not in line and "ends" not in line:
-                    offenders.append(f"{path.name}:{lineno}")
-    assert not offenders, f"possible credential print: {offenders}"
+            if "print(" in line and any(src in line for src in raw_sources):
+                offenders.append(f"{path.name}:{lineno}")
+    assert not offenders, f"raw credential reaches print(): {offenders}"
+
+
+def test_config_check_output_never_contains_the_key(capsys, monkeypatch):
+    """Behavioural proof, which no refactor can quietly defeat.
+
+    Feeds a distinctive credential through the real command and asserts the
+    value does not appear anywhere in the output. Stronger than any source
+    scan because it tests what the user would actually see.
+    """
+    import cli
+
+    monkeypatch.setenv("PROJECT_X_API_KEY", "REALKEY-9f2a8c1b4d6e7788")
+    monkeypatch.setenv("PROJECT_X_USERNAME", "realtrader")
+    monkeypatch.setenv("DRY_RUN", "true")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "false")
+
+    import argparse
+
+    assert cli.cmd_config_check(argparse.Namespace()) == 0
+    out = capsys.readouterr().out
+    assert "REALKEY-9f2a8c1b4d6e7788" not in out
+    assert "9f2a8c1b" not in out
+    assert "PRESENT" in out or "<set>" in out
 
 
 # ===========================================================================

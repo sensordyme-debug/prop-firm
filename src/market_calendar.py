@@ -48,9 +48,9 @@ CALENDAR_SOURCE: Final[str] = (
 )
 
 __all__ = [
-    "CALENDAR_VERIFIED",
     "CALENDAR_DATES_CROSS_CHECKED_2026",
     "CALENDAR_SOURCE",
+    "CALENDAR_VERIFIED",
     "COVERAGE",
     "DayStatus",
     "SessionDay",

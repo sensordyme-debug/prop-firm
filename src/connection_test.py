@@ -39,13 +39,12 @@ import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
-
 from project_x_py import ProjectX
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import market_calendar as mc  # noqa: E402
-from governor_adapter import (  # noqa: E402
+import market_calendar as mc
+from governor_adapter import (
     MNQ_POINT_VALUE,
     load_mll_floor,
     now_utc,
@@ -268,8 +267,8 @@ async def run() -> int:
             print("  The governor will HALT until this is resolved. That is by")
             print("  design: a guessed floor is worse than no trading.")
         else:
-            print(f"  Cross-check this against the TopstepX dashboard now:")
-            print(f"    python -m src.mll_tracker --verify --mll <displayed floor>")
+            print("  Cross-check this against the TopstepX dashboard now:")
+            print("    python -m src.mll_tracker --verify --mll <displayed floor>")
             if headroom_note := (net_liq - floor):
                 print(f"  Current headroom above the floor: ${headroom_note:,.2f}")
 

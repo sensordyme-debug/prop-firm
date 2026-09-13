@@ -18,8 +18,8 @@ Conflating these is how people talk themselves into trading something untested.
 
 | Claim | Status | Evidence |
 |---|---|---|
-| **Engine validated** | ✅ **YES** | 434 tests; hand-computed P&L reproduced to the cent; 65 injected mutations all fail the suite |
-| **Strategy validated** | ❌ **NO** | ORB v0.1 is a hypothesis. Never run on real data. Zero real trades. |
+| **Engine validated** | ✅ **YES** | 504 tests; hand-computed P&L reproduced to the cent; 65 injected mutations all fail the suite; ruff and mypy clean |
+| **Strategy validated** | ❌ **NO** | 9 candidate strategies, all hypotheses. None run on real data. Zero real trades. |
 | **Live execution validated** | ❌ **NO** | No order has ever been transmitted; the capability does not exist |
 | **Profitable** | ❌ **UNKNOWN** | No claim is made, and none is supported |
 
@@ -39,7 +39,7 @@ Normalisation + validation      timestamp convention must be DECLARED
         ↓
 Backtester                      no lookahead, costs, adverse slippage
         ↓
-Strategy (ORB v0.1)             pure; proposes only; knows no broker
+Strategy (9 candidates)         pure; proposes only; knows no broker
         ↓
 Risk Governor                   FINAL AUTHORITY; nothing overrides it
         ↓
@@ -69,7 +69,14 @@ ProjectX adapter                READ-ONLY — no order method exists
 | `execution/` | Broker-neutral models, order state machine, capability boundary |
 | `brokers/projectx.py` | The only module that speaks ProjectX |
 | `reconciliation.py` | Broker truth wins; discrepancies fail closed |
-| `strategies/orb.py` | ORB v0.1 — **a hypothesis** |
+| `strategies/` | Registry + 9 testable candidates + 9 declared pending data |
+| `connection.py` | Connection state machine; only READY may transmit |
+| `execution/protection.py` | Verifies a position is actually protected |
+| `execution/idempotency.py` | Deterministic tags + single-instance lock |
+| `session_state.py` | Restart survival; never authoritative over the broker |
+| `observability.py` | Structured JSON logs, correlation IDs, redaction |
+| `runtime.py` | Dry-run runtime; its broker has no order method |
+| `readiness.py` | The final gate; can never emit LIVE-TRADING-READY |
 
 ---
 
@@ -84,15 +91,31 @@ cp .env.example .env              # placeholders are detected as "no credentials
 ## Run
 
 ```bash
-python -m pytest                              # 434 tests, all offline
-python -m src.cli config                      # effective config, secrets redacted
-python -m src.cli connection-test             # read-only API diagnostic
-python -m src.cli data --probe MNQ            # how deep is the history?
+python -m pytest                     # 504 tests, all offline
+ruff check src tests && mypy         # static checks
+
+python -m src.cli config-check       # [READ-ONLY] credential PRESENCE only
+python -m src.cli readiness          # [READ-ONLY] the final safety gate
+python -m src.cli research           # [READ-ONLY] strategy catalogue
+python -m src.cli connection-test    # [READ-ONLY] needs credentials
+python -m src.cli data --probe MNQ   # [READ-ONLY] how deep is the history?
+python -m src.cli reconcile          # [READ-ONLY] local state vs broker
 python -m src.cli backtest --csv bars.csv --convention CLOSE --tz UTC
 python -m src.cli monte-carlo --csv bars.csv --convention CLOSE --tz UTC
+python -m src.cli dry-run            # [DRY RUN] decides, transmits nothing
 python -m src.cli mll --seed --mll 48000
-python -m src.cli compliance
 ```
+
+Every command is READ-ONLY or DRY-RUN. **There is no LIVE command**, because
+there is no code path that transmits.
+
+### API-KEY-READY is not LIVE-TRADING-READY
+
+`readiness` can emit exactly two classifications: `NOT READY` or
+`API-KEY-READY`. `LIVE-TRADING-READY` is not a value it can return.
+
+**API-KEY-READY** means credentials can be added safely and read-only
+validation can begin. It does **not** mean the system may trade.
 
 No test requires credentials. No command can transmit an order.
 
@@ -118,14 +141,16 @@ Cleared:
 - Risk governor, MLL tracker, calendar, contracts, compliance — all tested
 - Backtester proved against a hand-computed fixture, to the cent
 - Read-only ProjectX adapter, reconciliation, order state machine
-- 434 tests, 65 mutations caught
+- Connection state machine, bracket verification, duplicate protection
+- Dry-run runtime, structured logging, session persistence
+- 504 tests, 65 mutations caught, ruff and mypy clean
 
 Not cleared:
 - **Stage 0** — no API key yet
 - **Stage 1** — connection test has never run
 - **Stage 2** — history depth unknown; we may need vendor data
-- **Stage 4** — ORB has never seen real data
-- **Stage 5** — no dry-run runtime yet
+- **Stage 4** — no strategy has seen real data
+- **Stage 5** — dry-run runtime exists but has never consumed a live feed
 
 ---
 
@@ -160,11 +185,41 @@ Not cleared:
 
 ---
 
-## A note on what this repository does not claim
+## Research methodology
 
-ORB v0.1 has produced no trades and has no measured edge. The acceptance gates
-in ROADMAP Stage 4 exist to reject it, and most candidate strategies do not
-clear such gates — that is the normal outcome, not a failure.
+This is not an ORB bot. ORB is one hypothesis among nine implemented and nine
+more declared. Every candidate runs the same pipeline, and each stage can
+reject it:
+
+```
+DATA VALIDATION -> BASELINE BACKTEST -> COST STRESS -> IS/OOS
+  -> WALK-FORWARD -> MONTE CARLO -> PARAMETER ROBUSTNESS
+  -> REGIME ANALYSIS -> TOPSTEP CONSTRAINTS -> CROSS-STRATEGY COMPARISON
+```
+
+Guards that make the process honest rather than flattering:
+
+- **Splits are chronological**, never shuffled — shuffling leaks the future.
+- **Sweeps cap at 2 tunable parameters and 64 combinations**, and *raise*
+  rather than truncate. Every extra free parameter buys in-sample performance
+  that does not survive out of sample.
+- **Sensitivity tables sort by parameter, not profit.** Sorting by outcome
+  turns a sweep into an optimiser over one dataset.
+- **A lone winner surrounded by failures is flagged FRAGILE.** A spike is not
+  a region.
+- **Statistics that cannot be computed honestly return `Unavailable` with a
+  reason**, never a number.
+- **Strategies needing data we lack are declared, not approximated.**
+
+## What this repository does not claim
+
+**BACKTEST PERFORMANCE DOES NOT GUARANTEE FUTURE PERFORMANCE.**
+
+No strategy here has produced a single trade or has any measured edge. The
+acceptance gates exist to *reject* candidates, and most do not clear such
+gates — that is the normal outcome, not a failure.
+
+**"No strategy currently validated" is a successful research result.**
 
 Nothing here is ready for live trading, and this README will not say otherwise
 until every gate has actually been demonstrated.

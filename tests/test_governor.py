@@ -16,7 +16,7 @@ US DST in 2026: begins Sunday 2026-03-08, ends Sunday 2026-11-01.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -33,12 +33,10 @@ from governor import (
     entry_cutoff_at,
     evaluate,
     hard_flatten_at,
-    effective_trade_count,
     record_trade,
     roll_session,
     rth_open_at,
     session_start_for,
-    session_trading_date,
 )
 
 # ---------------------------------------------------------------------------
@@ -127,7 +125,7 @@ def elapsed(later: datetime, earlier: datetime) -> timedelta:
     transition ``b - a`` is off by an hour. Normalising to UTC is what makes
     the duration absolute.
     """
-    return later.astimezone(timezone.utc) - earlier.astimezone(timezone.utc)
+    return later.astimezone(UTC) - earlier.astimezone(UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +176,7 @@ def test_evaluate_is_deterministic_on_an_ordinary_day():
 
 def test_naive_datetime_is_rejected_not_coerced():
     with pytest.raises(ValueError, match="timezone-aware"):
-        snap(now=datetime(2026, 9, 16, 10, 0))  # noqa: DTZ001 - deliberate
+        snap(now=datetime(2026, 9, 16, 10, 0))
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +598,7 @@ def test_session_start_sunday_afternoon_before_the_reopen():
 
 def test_session_start_accepts_a_utc_input_and_resolves_in_et():
     """22:00 UTC on 2026-09-16 is 18:00 EDT -- exactly the boundary."""
-    utc = datetime(2026, 9, 16, 22, 0, tzinfo=timezone.utc)
+    utc = datetime(2026, 9, 16, 22, 0, tzinfo=UTC)
     assert session_start_for(utc) == datetime(2026, 9, 16, 18, 0, tzinfo=ET)
 
 
@@ -626,7 +624,7 @@ def test_session_start_converts_to_et_before_bucketing_by_date():
 
 def test_session_start_agrees_across_zones_for_the_same_instant():
     """The same instant expressed in four zones must yield one session."""
-    instant = datetime(2026, 9, 17, 19, 0, tzinfo=timezone.utc)  # 15:00 ET
+    instant = datetime(2026, 9, 17, 19, 0, tzinfo=UTC)  # 15:00 ET
     expected = datetime(2026, 9, 16, 18, 0, tzinfo=ET)
     for zone in ("UTC", "America/New_York", "Asia/Tokyo", "Europe/London"):
         assert session_start_for(instant.astimezone(ZoneInfo(zone))) == expected
@@ -639,13 +637,13 @@ def test_session_start_rejects_naive_datetimes():
     host not set to ET this would shift every session boundary with no error.
     """
     with pytest.raises(ValueError, match="timezone-aware"):
-        session_start_for(datetime(2026, 9, 16, 10, 0))  # noqa: DTZ001 - deliberate
+        session_start_for(datetime(2026, 9, 16, 10, 0))
 
 
 def test_derived_session_times_also_reject_naive_datetimes():
     for fn in (hard_flatten_at, entry_cutoff_at, rth_open_at):
         with pytest.raises(ValueError, match="timezone-aware"):
-            fn(datetime(2026, 9, 16, 10, 0))  # noqa: DTZ001 - deliberate
+            fn(datetime(2026, 9, 16, 10, 0))
 
 
 # -- DST transitions --------------------------------------------------------

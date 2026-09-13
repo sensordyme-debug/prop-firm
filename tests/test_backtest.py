@@ -39,8 +39,8 @@ def t(hour: int, minute: int) -> datetime:
     return datetime(2026, 9, 16, hour, minute, tzinfo=ET)
 
 
-def bar(hour, minute, o, h, l, c) -> Bar:  # noqa: E741
-    return Bar(ts=t(hour, minute), open=o, high=h, low=l, close=c)
+def bar(hour, minute, o, h, lo, c) -> Bar:
+    return Bar(ts=t(hour, minute), open=o, high=h, low=lo, close=c)
 
 
 def flat_bars(n: int, start_hour: int = 9, start_minute: int = 35,
@@ -131,7 +131,7 @@ def test_a_peeking_strategy_fails_the_backtest():
     """A strategy that tries to cheat must break, not silently succeed."""
 
     def cheater(bars: BarWindow, state, config):
-        return bars[bars.index + 1]  # the next bar, which it must not see
+        return bars[bars.current_index + 1]  # the next bar, which it must not see
 
     bars = flat_bars(6, price=100.0, spread=1.0)
     with pytest.raises(LookaheadError):

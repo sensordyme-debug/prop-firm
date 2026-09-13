@@ -10,6 +10,7 @@ plugin for three coroutines.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC
 
 import pytest
 from project_x_py.models import Account, Instrument, Position
@@ -351,13 +352,12 @@ def test_no_source_file_localises_with_replace_tzinfo():
 
 def test_adapter_clock_reads_utc_not_local_time():
     """now_utc must return a UTC instant, not a locally-stamped one."""
-    from datetime import timezone
 
     from governor_adapter import now_utc
 
     value = now_utc()
     assert value.tzinfo is not None
-    assert value.utcoffset() == timezone.utc.utcoffset(None)
+    assert value.utcoffset() == UTC.utcoffset(None)
 
 
 def test_connection_test_never_imports_an_order_capable_object():

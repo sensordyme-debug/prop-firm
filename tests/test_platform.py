@@ -6,20 +6,26 @@ credentials, and none may reach a network.
 
 from __future__ import annotations
 
-import asyncio
-from datetime import date, datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
 
 import research
-from backtest import Bar, BarSeries, BarTimestamp, BarWindow, CostModel, StrategyState, run_backtest
+from backtest import (
+    Bar,
+    BarSeries,
+    BarTimestamp,
+    BarWindow,
+    CostModel,
+    StrategyState,
+    run_backtest,
+)
 from config import AppConfig, ConfigError, load_config
 from execution.broker import ContractSpec
 from execution.models import (
-    AccountState,
     AuthenticationError,
     BrokerUnavailableError,
+    MarketBar,
     OrderState,
     OrderType,
     Position,
@@ -28,13 +34,12 @@ from execution.models import (
     WorkingOrder,
 )
 from marketdata import ET, infer_timestamp_convention, normalise, to_bar_series
-from execution.models import MarketBar
 from performance import Unavailable, analyse
 from reconciliation import reconcile
 from research import monte_carlo, split, walk_forward_windows
 from strategies.orb import OpeningRangeBreakout, OrbConfig, compute_atr, opening_range
 
-UTC = timezone.utc
+UTC = UTC
 
 
 # ===========================================================================

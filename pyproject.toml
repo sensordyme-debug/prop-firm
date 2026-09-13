@@ -1,0 +1,52 @@
+[project]
+name = "prop-firm"
+version = "0.1.0"
+description = "Quantitative futures research and execution platform (Topstep MNQ)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 92
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",    # line length: prose in docstrings carries the reasoning
+    "B008",    # function call in default arg: dataclass field() is fine
+    "SIM108",  # ternary: explicit if/else is clearer in safety code
+    "RUF012",  # mutable class attrs: dataclass defaults are handled
+    # --- the following are DELIBERATE, not unexamined ---
+    "UP042",   # str+Enum -> StrEnum: the str mixin is relied on for .value
+               # comparisons in tests and JSON output. Changing it is a
+               # behaviour change, not a style fix.
+    "B905",    # zip(strict=): every zip here pairs a sequence with its own
+               # offset slice (bars, bars[1:]), so unequal length is the
+               # POINT. strict=True would raise on correct code.
+    "RUF007",  # itertools.pairwise: same sites as B905; the explicit slice
+               # reads more clearly next to the reason it exists.
+    "SIM102",  # nested if: kept where each branch carries its own comment
+               # explaining a distinct safety condition.
+    "B007",    # unused loop var: kept where the name documents the shape.
+]
+
+[tool.ruff.lint.per-file-ignores]
+# C408: keyword-style dict() reads better than a literal where the result is
+# immediately spread into kwargs ({**base, **override}), which is the pattern
+# these test builders use.
+"tests/*" = ["B011", "C408"]
+# data.py and cli.py insert src/ on sys.path before importing siblings, so that
+# `python -m src.data` resolves them. The imports MUST follow that shim.
+"src/data.py" = ["E402"]
+"src/cli.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src"]
+ignore_missing_imports = true
+warn_unused_ignores = false
+# Deliberately not --strict. Strict mode on a codebase with heavy Protocol and
+# dataclass use produces noise that gets suppressed wholesale, which is worse
+# than a narrower check people actually read.
+check_untyped_defs = false
+warn_return_any = false

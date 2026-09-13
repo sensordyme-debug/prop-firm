@@ -29,18 +29,21 @@ from __future__ import annotations
 
 import math
 import statistics
-from dataclasses import asdict, dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Sequence
+from typing import Any
 
 __all__ = [
     "TRADING_DAYS_PER_YEAR",
-    "Unavailable",
-    "TradeStats",
+    "ExcursionStats",
+    "PerformanceReport",
     "PortfolioStats",
     "RiskAdjustedStats",
-    "PerformanceReport",
+    "TradeStats",
+    "Unavailable",
     "analyse",
+    "excursion_stats",
 ]
 
 TRADING_DAYS_PER_YEAR = 252
@@ -75,6 +78,63 @@ def _fmt(value: Maybe, spec: str = ",.2f", prefix: str = "") -> str:
 # ---------------------------------------------------------------------------
 # Trade statistics
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExcursionStats:
+    """MAE / MFE aggregates.
+
+    Reported, never auto-optimised. Fitting a stop to the observed adverse
+    excursions of one sample is fitting to that sample: the stop that would
+    have survived every past loser is the stop that survives exactly those
+    losers. These are here to be READ by a human deciding whether the stop
+    methodology is sane, which is a different activity from tuning.
+    """
+
+    count: int = 0
+    average_mae: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    median_mae: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    max_mae: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    average_mfe: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    median_mfe: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    max_mfe: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    edge_ratio: Maybe = field(default_factory=lambda: Unavailable("no trades"))
+    mae_percentiles: tuple[tuple[int, float], ...] = ()
+    mfe_percentiles: tuple[tuple[int, float], ...] = ()
+
+
+def _percentiles(values: Sequence[float]) -> tuple[tuple[int, float], ...]:
+    if not values:
+        return ()
+    ordered = sorted(values)
+    out = []
+    for pct in (25, 50, 75, 90, 95):
+        k = max(0, min(len(ordered) - 1,
+                       round((pct / 100.0) * (len(ordered) - 1))))
+        out.append((pct, ordered[k]))
+    return tuple(out)
+
+
+def excursion_stats(trades: Sequence[Any]) -> ExcursionStats:
+    usable = [t for t in trades if hasattr(t, "mae")]
+    if not usable:
+        return ExcursionStats()
+    maes = [t.mae for t in usable]
+    mfes = [t.mfe for t in usable]
+    total_mae = sum(maes)
+    return ExcursionStats(
+        count=len(usable),
+        average_mae=statistics.fmean(maes),
+        median_mae=statistics.median(maes),
+        max_mae=max(maes),
+        average_mfe=statistics.fmean(mfes),
+        median_mfe=statistics.median(mfes),
+        max_mfe=max(mfes),
+        edge_ratio=(sum(mfes) / total_mae if total_mae > 0
+                    else Unavailable("no adverse excursion recorded")),
+        mae_percentiles=_percentiles(maes),
+        mfe_percentiles=_percentiles(mfes),
+    )
 
 
 @dataclass(frozen=True)
@@ -257,7 +317,7 @@ def _portfolio_stats(
     return PortfolioStats(
         starting_balance=starting_balance,
         ending_balance=ending,
-        peak_equity=max(equities + [starting_balance]),
+        peak_equity=max([*equities, starting_balance]),
         total_return=(ending - starting_balance) / starting_balance,
         max_drawdown=worst,
         max_drawdown_pct=worst / starting_balance if starting_balance else 0.0,
@@ -370,6 +430,11 @@ class PerformanceReport:
     shorts: TradeStats
     portfolio: PortfolioStats
     risk: RiskAdjustedStats
+    excursions: ExcursionStats = field(default_factory=ExcursionStats)
+    excursions_winners: ExcursionStats = field(default_factory=ExcursionStats)
+    excursions_losers: ExcursionStats = field(default_factory=ExcursionStats)
+    excursions_long: ExcursionStats = field(default_factory=ExcursionStats)
+    excursions_short: ExcursionStats = field(default_factory=ExcursionStats)
     gates: dict[str, Any] = field(default_factory=dict)
     assumptions: tuple[str, ...] = ()
     governor_halts: tuple[str, ...] = ()
@@ -480,6 +545,26 @@ class PerformanceReport:
         add(f"  Average duration: {_fmt(t.average_duration, '.1f')} min"
             f"   median {_fmt(t.median_duration, '.1f')} min")
 
+        e = self.excursions
+        add("")
+        add("EXCURSIONS (MAE / MFE)")
+        add("-" * 22)
+        add(f"  Average MAE:  {_fmt(e.average_mae, ',.2f', '$'):>12}"
+            f"   median {_fmt(e.median_mae, ',.2f', '$')}")
+        add(f"  Average MFE:  {_fmt(e.average_mfe, ',.2f', '$'):>12}"
+            f"   median {_fmt(e.median_mfe, ',.2f', '$')}")
+        add(f"  Worst MAE:    {_fmt(e.max_mae, ',.2f', '$'):>12}")
+        add(f"  Edge ratio:   {_fmt(e.edge_ratio, '.2f'):>12}  (total MFE / total MAE)")
+        for name, grp in (("winners", self.excursions_winners),
+                          ("losers", self.excursions_losers),
+                          ("long", self.excursions_long),
+                          ("short", self.excursions_short)):
+            add(f"  {name:<9s} n={grp.count:<4d} "
+                f"MAE {_fmt(grp.average_mae, ',.2f', '$')}  "
+                f"MFE {_fmt(grp.average_mfe, ',.2f', '$')}")
+        add("  Read, not optimised: fitting stops to observed excursions fits "
+            "this sample.")
+
         for label, side in (("LONG", self.longs), ("SHORT", self.shorts)):
             add("")
             add(label)
@@ -550,6 +635,11 @@ def analyse(
         shorts=_trade_stats([t for t in trades if t.side == -1]),
         portfolio=portfolio,
         risk=_risk_adjusted(portfolio),
+        excursions=excursion_stats(trades),
+        excursions_winners=excursion_stats([t for t in trades if t.net > 0]),
+        excursions_losers=excursion_stats([t for t in trades if t.net < 0]),
+        excursions_long=excursion_stats([t for t in trades if t.side == 1]),
+        excursions_short=excursion_stats([t for t in trades if t.side == -1]),
         gates={
             "max drawdown": gates.detail.get("drawdown", ""),
             "consecutive losing days": gates.detail.get("consecutive_losing_days", ""),
@@ -557,7 +647,8 @@ def analyse(
             "strategy-caused halts": gates.detail.get("strategy_halts", ""),
             "FINAL VERDICT": "PASS" if gates.passed else "FAIL",
         },
-        assumptions=tuple(costs.describe()) + (
+        assumptions=(
+            *costs.describe(),
             "entry fill      next bar's OPEN, never the signal bar's close",
             "both touched    STOP assumed first, ALWAYS",
             f"bar timestamps  {result.timestamp_convention.value}-labelled",

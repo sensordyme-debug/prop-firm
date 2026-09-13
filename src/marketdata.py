@@ -22,9 +22,10 @@ convention explicitly, here, where it is visible.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Sequence
+from datetime import datetime
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from backtest import Bar, BarSeries, BarTimestamp
@@ -34,9 +35,9 @@ __all__ = [
     "ET",
     "TimestampFinding",
     "bars_from_projectx_frame",
-    "to_bar_series",
     "infer_timestamp_convention",
     "normalise",
+    "to_bar_series",
 ]
 
 ET = ZoneInfo("America/New_York")

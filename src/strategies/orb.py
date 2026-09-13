@@ -41,14 +41,15 @@ curve-fitting, not research.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import time
-from typing import Final, Sequence
+from typing import Final
 from zoneinfo import ZoneInfo
 
 from backtest import Bar, BarWindow, Signal, StrategyState
 
-__all__ = ["OrbConfig", "OpeningRange", "OpeningRangeBreakout", "compute_atr"]
+__all__ = ["OpeningRange", "OpeningRangeBreakout", "OrbConfig", "compute_atr"]
 
 ET: Final[ZoneInfo] = ZoneInfo("America/New_York")
 

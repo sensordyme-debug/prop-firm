@@ -37,11 +37,11 @@ from typing import Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 __all__ = [
+    "SUPPORTED_SYMBOLS",
+    "AppConfig",
     "ConfigError",
     "ExecutionMode",
-    "AppConfig",
     "load_config",
-    "SUPPORTED_SYMBOLS",
 ]
 
 SUPPORTED_SYMBOLS: Final[frozenset[str]] = frozenset({"MNQ"})

@@ -33,19 +33,19 @@ from __future__ import annotations
 
 import random
 import statistics
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 __all__ = [
     "DataSplit",
-    "split",
-    "WalkForwardWindow",
-    "walk_forward_windows",
-    "ParameterResult",
-    "sensitivity_table",
     "MonteCarloResult",
+    "ParameterResult",
+    "WalkForwardWindow",
     "monte_carlo",
+    "sensitivity_table",
+    "split",
+    "walk_forward_windows",
 ]
 
 
@@ -210,7 +210,7 @@ class MonteCarloResult:
         if not values:
             return 0.0
         ordered = sorted(values)
-        k = max(0, min(len(ordered) - 1, int(round((pct / 100.0) * (len(ordered) - 1)))))
+        k = max(0, min(len(ordered) - 1, round((pct / 100.0) * (len(ordered) - 1))))
         return ordered[k]
 
     @property

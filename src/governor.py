@@ -66,36 +66,36 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
 from typing import Final
 from zoneinfo import ZoneInfo
 
 from compliance import validate_daily_target
 from contracts import front_month, is_expiry_date
-from market_calendar import DayStatus, classify
+from market_calendar import classify
 
 ET: Final[ZoneInfo] = ZoneInfo("America/New_York")
 
 __all__ = [
     "ET",
-    "Action",
-    "Reason",
-    "Config",
     "AccountSnapshot",
-    "GovernorState",
+    "Action",
+    "Config",
     "GovernorDecision",
-    "session_start_for",
-    "session_trading_date",
-    "hard_flatten_at",
-    "entry_cutoff_at",
-    "rth_open_at",
+    "GovernorState",
+    "Reason",
+    "apply_decision",
     "compute_session_pnl",
     "effective_trade_count",
+    "entry_cutoff_at",
     "evaluate",
-    "roll_session",
+    "hard_flatten_at",
     "record_trade",
-    "apply_decision",
+    "roll_session",
+    "rth_open_at",
+    "session_start_for",
+    "session_trading_date",
 ]
 
 
@@ -288,7 +288,7 @@ def _utc(value: datetime) -> datetime:
     "is it past the flatten time" and "how long until the flatten" are always
     absolute, never wall-clock.
     """
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 @dataclass(frozen=True)

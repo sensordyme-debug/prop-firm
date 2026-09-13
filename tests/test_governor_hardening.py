@@ -8,7 +8,7 @@ by a caller that is working correctly in every other respect.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -374,7 +374,7 @@ def test_calendar_guard_can_be_disabled():
 
 def test_roll_session_compares_anchors_absolutely_not_by_wall_clock():
     """Same instant, different zone: this is the SAME session, not a new one."""
-    utc_anchor = datetime(2026, 9, 15, 22, 0, tzinfo=timezone.utc)  # 18:00 ET
+    utc_anchor = datetime(2026, 9, 15, 22, 0, tzinfo=UTC)  # 18:00 ET
     assert utc_anchor == datetime(2026, 9, 15, 18, 0, tzinfo=ET)
 
     st = state(session_start=utc_anchor, trades_today=1)
@@ -384,7 +384,7 @@ def test_roll_session_compares_anchors_absolutely_not_by_wall_clock():
 
 
 def test_evaluate_accepts_an_anchor_expressed_in_another_zone():
-    st = state(session_start=datetime(2026, 9, 15, 22, 0, tzinfo=timezone.utc))
+    st = state(session_start=datetime(2026, 9, 15, 22, 0, tzinfo=UTC))
     assert evaluate(snap(), st, cfg()).code != Reason.STALE_SESSION_ANCHOR
 
 
@@ -402,7 +402,7 @@ def test_bare_equality_would_confuse_the_two_halves_of_a_dst_fold():
     edt = datetime(2026, 11, 1, 1, 30, tzinfo=ET, fold=0)  # 05:30 UTC
     est = datetime(2026, 11, 1, 1, 30, tzinfo=ET, fold=1)  # 06:30 UTC
     assert edt == est, "bare equality cannot tell them apart"
-    assert edt.astimezone(timezone.utc) != est.astimezone(timezone.utc)
+    assert edt.astimezone(UTC) != est.astimezone(UTC)
 
     fold_cfg = cfg(session_boundary_et=edt.time(), enforce_market_calendar=False)
     now = datetime(2026, 11, 1, 1, 40, tzinfo=ET, fold=0)

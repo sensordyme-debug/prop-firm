@@ -33,7 +33,7 @@ from __future__ import annotations
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from math import isclose
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol
@@ -93,7 +93,7 @@ def now_utc() -> datetime:
     Convert to ET for display only; the governor converts internally for its
     own bucketing and comparisons.
     """
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def to_et(value: datetime, tz: ZoneInfo = ET) -> datetime:

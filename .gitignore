@@ -9,3 +9,5 @@ logs/*.jsonl
 .idea/
 .vscode/
 mll_state.json
+state/
+*.lock

@@ -21,17 +21,17 @@ and nothing downstream may run without a pass.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Sequence
 
 from execution.models import Position, WorkingOrder
 
 __all__ = [
-    "ReconciliationStatus",
     "Discrepancy",
     "ReconciliationResult",
+    "ReconciliationStatus",
     "reconcile",
 ]
 

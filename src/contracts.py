@@ -46,19 +46,19 @@ from typing import Final
 from market_calendar import market_is_open
 
 __all__ = [
-    "QUARTERLY_MONTHS",
     "MONTH_CODES",
+    "QUARTERLY_MONTHS",
     "ROLL_CONVENTION_CME_VERIFIED",
     "ContractMonth",
-    "third_friday",
-    "expiry_date",
-    "roll_date",
-    "front_month",
     "contract_symbol",
+    "expiry_date",
+    "front_month",
     "is_expiry_date",
     "is_roll_date",
     "next_roll_on_or_after",
+    "roll_date",
     "rolls_between",
+    "third_friday",
 ]
 
 QUARTERLY_MONTHS: Final[tuple[int, ...]] = (3, 6, 9, 12)

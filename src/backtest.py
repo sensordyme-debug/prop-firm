@@ -53,6 +53,7 @@ result from this harness means anything.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
@@ -60,8 +61,8 @@ from enum import Enum
 from typing import Final, Protocol
 
 from governor import (
-    Action,
     AccountSnapshot,
+    Action,
     Config,
     GovernorDecision,
     GovernorState,
@@ -76,19 +77,19 @@ from governor import (
 from mll_tracker import MllState, floor_for, record_eod, seed_state
 
 __all__ = [
-    "LookaheadError",
-    "BarConventionError",
-    "BarTimestamp",
-    "Bar",
-    "BarSeries",
-    "BarWindow",
-    "Signal",
-    "StrategyState",
-    "Strategy",
-    "CostModel",
-    "Trade",
-    "GateReport",
     "BacktestResult",
+    "Bar",
+    "BarConventionError",
+    "BarSeries",
+    "BarTimestamp",
+    "BarWindow",
+    "CostModel",
+    "GateReport",
+    "LookaheadError",
+    "Signal",
+    "Strategy",
+    "StrategyState",
+    "Trade",
     "run_backtest",
 ]
 
@@ -235,7 +236,13 @@ class BarWindow(Sequence[Bar]):
         return self._bars[self._upto]
 
     @property
-    def index(self) -> int:
+    def current_index(self) -> int:
+        """Position of the current bar.
+
+        Deliberately NOT called ``index``: this subclasses ``Sequence``, whose
+        ``index(value)`` searches for a value. Shadowing it would silently
+        change the meaning of a standard method.
+        """
         return self._upto
 
 
@@ -318,7 +325,7 @@ class CostModel:
             f"slippage        {self.slippage_ticks:g} ticks "
             f"({self.slippage_points:g} pts, ${slip_dollars:.2f}/contract) "
             f"adverse on entry and stop, never favourable",
-            f"targets         fill at the limit exactly, never improved",
+            "targets         fill at the limit exactly, never improved",
             f"point value     ${self.point_value:.2f} per point",
         ]
 
@@ -335,10 +342,22 @@ class Trade:
     exit_kind: str          # TARGET | STOP | FLATTEN | END_OF_DATA
     gross: float
     commission: float
+    mae: float = 0.0        # Maximum Adverse Excursion, dollars, >= 0
+    mfe: float = 0.0        # Maximum Favourable Excursion, dollars, >= 0
 
     @property
     def net(self) -> float:
         return self.gross - self.commission
+
+    @property
+    def edge_ratio(self) -> float | None:
+        """MFE / MAE. High means the trade went our way before it went wrong.
+
+        Useful for judging whether stops are too tight or targets too far,
+        WITHOUT re-running anything. Deliberately not used to auto-tune: fitting
+        stops to observed excursions is fitting to one sample.
+        """
+        return None if self.mae <= 0 else self.mfe / self.mae
 
     @property
     def is_win(self) -> bool:
@@ -488,8 +507,8 @@ class BacktestResult:
         add("ASSUMPTIONS  (fills are what backtests lie about most)")
         for line in self.costs.describe():
             add(f"  {line}")
-        add(f"  entry fill      next bar's OPEN, never the signal bar's close")
-        add(f"  both touched    STOP assumed first, ALWAYS")
+        add("  entry fill      next bar's OPEN, never the signal bar's close")
+        add("  both touched    STOP assumed first, ALWAYS")
         add(f"  bar timestamps  {self.timestamp_convention.value}-labelled")
         add(f"  bars replayed   {self.bars_seen}")
 
@@ -558,6 +577,17 @@ class _Position:
     stop: float
     target: float
     trading_date: date
+    worst_price: float = 0.0   # furthest against us while open
+    best_price: float = 0.0    # furthest in our favour while open
+
+    def observe(self, bar: Bar) -> None:
+        """Track excursion extremes, including the entry bar itself."""
+        if self.side == 1:
+            self.worst_price = min(self.worst_price, bar.low)
+            self.best_price = max(self.best_price, bar.high)
+        else:
+            self.worst_price = max(self.worst_price, bar.high)
+            self.best_price = min(self.best_price, bar.low)
 
 
 def _unrealised(position: _Position | None, mark: float, costs: CostModel) -> float:
@@ -603,7 +633,6 @@ def run_backtest(
 
     gov_state: GovernorState | None = None
     strat_state: StrategyState | None = None
-    session_balance_at_roll = starting_balance
 
     def close_position(
         at_price: float, when: datetime, kind: str
@@ -613,6 +642,8 @@ def run_backtest(
         gross = cost_model.dollars(
             (at_price - position.entry_price) * position.side, position.size
         )
+        adverse = (position.entry_price - position.worst_price) * position.side
+        favourable = (position.best_price - position.entry_price) * position.side
         trade = Trade(
             entry_time=position.entry_time,
             exit_time=when,
@@ -624,6 +655,8 @@ def run_backtest(
             exit_kind=kind,
             gross=gross,
             commission=cost_model.commission_per_round_turn,
+            mae=max(0.0, cost_model.dollars(adverse, position.size)),
+            mfe=max(0.0, cost_model.dollars(favourable, position.size)),
         )
         trades.append(trade)
         balance += trade.net
@@ -647,6 +680,8 @@ def run_backtest(
                 stop=pending.stop,
                 target=pending.target,
                 trading_date=trading_date,
+                worst_price=fill,
+                best_price=fill,
             )
             if gov_state is not None:
                 gov_state = record_trade(gov_state)
@@ -661,7 +696,10 @@ def run_backtest(
         pending = None
 
         # --- B. bracket exits, stop first on a tie -------------------------
+        # Excursions are observed BEFORE the exit test, so the bar that stops
+        # us out still contributes its adverse move.
         if position is not None:
+            position.observe(bar)
             if position.side == 1:
                 hit_stop = bar.low <= position.stop
                 hit_target = bar.high >= position.target
@@ -689,17 +727,21 @@ def run_backtest(
                 last_reconcile=t_close,
                 session_start=current_session,
             )
-            session_balance_at_roll = balance
         elif gov_state.session_start != current_session:
             # The previous session closed: record its EOD for the MLL floor.
-            previous_date = session_trading_date(
-                gov_state.session_start + timedelta(minutes=1), cfg
-            )
-            try:
-                mll = record_eod(mll, previous_date, balance)
-            except ValueError:
-                pass  # out-of-order or duplicate; the floor simply does not move
-            session_balance_at_roll = balance
+            previous_anchor = gov_state.session_start
+            if previous_anchor is None:
+                # Cannot identify which session just closed, so the floor is
+                # left alone rather than moved on a guess.
+                previous_date = None
+            else:
+                previous_date = session_trading_date(
+                    previous_anchor + timedelta(minutes=1), cfg
+                )
+            # Out-of-order or duplicate dates leave the floor alone by design.
+            if previous_date is not None:
+                with contextlib.suppress(ValueError):
+                    mll = record_eod(mll, previous_date, balance)
 
         snapshot = AccountSnapshot(
             net_liq=net_liq,

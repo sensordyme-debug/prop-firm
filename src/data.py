@@ -44,35 +44,36 @@ import argparse
 import csv
 import json
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Final, Sequence
+from typing import Final
 from zoneinfo import ZoneInfo
 
 _SRC = Path(__file__).resolve().parent
 if str(_SRC) not in sys.path:  # so `python -m src.data` finds its siblings
     sys.path.insert(0, str(_SRC))
 
-from backtest import Bar, BarSeries, BarTimestamp  # noqa: E402
-from contracts import front_month, rolls_between  # noqa: E402
-from market_calendar import classify, is_open  # noqa: E402
+from backtest import Bar, BarSeries, BarTimestamp
+from contracts import front_month, rolls_between
+from market_calendar import is_open
 
 __all__ = [
-    "Severity",
-    "DataIssue",
     "CsvSchema",
+    "DataIssue",
     "LoadResult",
     "ProbeResult",
-    "parse_rows",
-    "validate",
+    "Severity",
     "build_series",
     "load_csv",
-    "write_cache",
+    "parse_rows",
+    "probe",
     "read_cache",
     "rows_from_projectx",
-    "probe",
+    "validate",
+    "write_cache",
 ]
 
 # CME equity index: the nightly maintenance break, 17:00-18:00 ET.
@@ -252,7 +253,7 @@ def _parse_timestamp(raw: str) -> datetime:
     # Heuristic only, and a narrow one: 1e11 separates seconds from millis
     # for every date this project will ever see.
     seconds = number / 1000.0 if number > 1e11 else number
-    return datetime.fromtimestamp(seconds, tz=timezone.utc)
+    return datetime.fromtimestamp(seconds, tz=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +293,7 @@ def validate(
     for bar in bars:
         if bar.ts.utcoffset() is None:
             continue
-        alternate = bar.ts.replace(fold=1 - bar.ts.fold)  # noqa: DTZ  (not tzinfo=)
+        alternate = bar.ts.replace(fold=1 - bar.ts.fold)
         if alternate.utcoffset() != bar.ts.utcoffset():
             issues.append(DataIssue(
                 Severity.WARNING, "AMBIGUOUS_DST_TIME",
@@ -491,7 +492,7 @@ def write_cache(path: Path | str, series: BarSeries, *, symbol: str) -> Path:
         "bars": len(series.bars),
         "earliest": series.bars[0].ts.isoformat() if series.bars else None,
         "latest": series.bars[-1].ts.isoformat() if series.bars else None,
-        "written_utc": datetime.now(timezone.utc).isoformat(),
+        "written_utc": datetime.now(UTC).isoformat(),
     }
     Path(str(target) + CACHE_META_SUFFIX).write_text(
         json.dumps(meta, indent=2) + "\n", encoding="utf-8"
@@ -650,7 +651,7 @@ async def probe(
                 frame = await client.get_bars(
                     symbol, days=days, interval=interval_minutes
                 )
-            except Exception as exc:  # noqa: BLE001 - reported, not swallowed
+            except Exception as exc:
                 attempts.append((days, 0, f"failed: {type(exc).__name__}"))
                 notes.append(f"{days}-day request failed: {exc}")
                 break
@@ -754,7 +755,7 @@ def main(argv: list[str] | None = None) -> int:
 
         try:
             outcome = asyncio.run(probe(args.probe, interval_minutes=args.interval))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"PROBE FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
             print(
                 "This needs a working key. Run src/connection_test.py first "
