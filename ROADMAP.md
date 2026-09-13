@@ -4,8 +4,13 @@ Stages are gated. **Do not start a stage until the previous gate is met.** The
 gates exist because each one is a documented way these accounts die.
 
 Current state: governor, market calendar, MLL tracker, connection test, the
-backtest harness, the data layer and the compliance tracker are built and
-unit-tested. No code has ever touched a live account, and no strategy exists yet.
+backtest harness, the data layer, the compliance tracker, the configuration
+layer, the broker abstraction, the read-only ProjectX adapter, reconciliation,
+the order state machine, performance analytics, robustness tooling and ORB v0.1
+are built and unit-tested (434 tests, 65 mutations caught).
+
+**No code has ever touched a live account, and order transmission does not
+exist.** ORB v0.1 is a hypothesis that has never seen real data.
 
 Firm rules were re-verified against Topstep's own help centre on 2026-09-12;
 FIRM_RULES.md records what was confirmed and what is still contested.
@@ -104,6 +109,15 @@ strategy family — not to loosen the gates.
 ---
 
 ## Stage 5 — Dress rehearsal
+
+**Added prerequisite, discovered 2026-09-12:** ProjectX native brackets are
+gated behind an ACCOUNT SETTING. In the default *Position Brackets* mode,
+submitted brackets are **rejected**; only *Auto OCO Brackets* mode accepts
+`stopLossBracket`/`takeProfitBracket`. CLAUDE.md constraint 1 depends on this,
+so the account mode must be checked in TopstepX → Settings → Risk Settings, and
+the behaviour on rejection observed, BEFORE execution is considered. See
+`docs/PROJECTX_API.md` §4.1.
+
 
 `DRY_RUN=true` across a full Globex session. The system computes every decision
 and logs the exact order it would have sent, transmitting nothing.

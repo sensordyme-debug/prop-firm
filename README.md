@@ -1,123 +1,170 @@
-# Topstep Algo — project context
+# Topstep MNQ — quantitative futures trading platform
 
-Read this before writing any code. It carries the decisions already made so they
-don't get re-litigated or accidentally violated.
+> ## ORDER TRANSMISSION IS DISABLED
+> This system **cannot place an order.** Not "is configured not to" — the
+> read-only broker adapter has no order method, and the only function that can
+> grant execution capability raises unconditionally. Enabling execution is a
+> reviewed code change after the Stage 5 gates are demonstrated, never a
+> configuration edit.
+
+Research and execution architecture for a **Topstep 50K Trading Combine** on
+**MNQ**, against the **ProjectX / TopstepX** API.
+
+---
+
+## Four claims, deliberately kept separate
+
+Conflating these is how people talk themselves into trading something untested.
+
+| Claim | Status | Evidence |
+|---|---|---|
+| **Engine validated** | ✅ **YES** | 434 tests; hand-computed P&L reproduced to the cent; 65 injected mutations all fail the suite |
+| **Strategy validated** | ❌ **NO** | ORB v0.1 is a hypothesis. Never run on real data. Zero real trades. |
+| **Live execution validated** | ❌ **NO** | No order has ever been transmitted; the capability does not exist |
+| **Profitable** | ❌ **UNKNOWN** | No claim is made, and none is supported |
+
+---
 
 ## What this is
 
-An automated futures trading bot for a **Topstep 50K Trading Combine** account,
-written in Python against the **ProjectX Gateway API** via the `project-x-py` SDK.
+An event-driven platform built around the specific rules of a Topstep Combine,
+not a generic trading bot. The rules are the architecture: the trailing Max
+Loss Limit, the 18:00 ET session boundary, the consistency ratios, and the
+flatten deadline all appear as code with tests, not as comments.
 
-Owner: Monish. Sole author — the strategy must remain solely owned and must not be
-shared, sold, or run at another prop firm. Keep git history clean and attributable;
-it is the evidence of sole ownership if Topstep ever asks.
-
-## Hard rules that end the account
-
-These are firm rules, not preferences. Violating any of them is not a bug, it is a
-blown account.
-
-| Rule | Value | Consequence |
-|---|---|---|
-| Max Loss Limit (the "One Rule") | $2,000, EOD trailing | **Permanent failure.** Enforced in real time on net liquidation, including open P&L. |
-| Daily Loss Limit | $1,000 (Responsible Trading Advantage) | Locks the account for that session only. |
-| Consistency target (Combine) | 55% | Best single day must stay within 55% of the $3,000 profit target. |
-| Profit target (Combine) | $3,000 | Pass condition. No minimum trading days. |
-| Max contracts | 5 mini / 50 micro | Micros count 10:1. |
-| Flat by | 15:10 CT / 16:10 ET | Positions must be closed. Day trading only, no overnight. |
-| HFT | Prohibited | No latency arbitrage, no sub-second churn. |
-| Hosting | Personal device only | **No VPS, no VPN, no remote server may transmit orders.** A server may log, backtest and serve read-only dashboards. |
-
-## Non-negotiable design constraints
-
-1. **Every entry is a native gateway bracket order.** Stop and target rest on
-   Topstep's side. Never a bare market order with the stop living in this process —
-   if Python dies, the position must still be protected.
-2. **The risk governor is authoritative.** The strategy proposes; the governor
-   decides. No order is transmitted without governor approval.
-3. **Net liquidation, not realised P&L.** The MLL is enforced against net liq
-   including open positions. Any check that uses realised P&L is wrong.
-4. **Session boundary is 18:00 ET, not midnight.** All daily accounting resets there.
-5. **Reconcile on every startup.** Query actual positions and working orders and
-   adopt reality. Never assume flat.
-6. **Position size is 2 MNQ, hard-coded.** Not a tunable parameter. Raising it
-   requires clearing the go-live gates first.
-7. **No secrets in code.** `.env` only, and `.env` is gitignored from commit one.
-
-## Risk governor spec
-
-Flatten and disable for the session on any of:
-- Daily profit target reached (+$500)
-- Daily loss reached (-$250) — far inside the firm's $1,000 DLL
-- Clock reaches 16:30 ET
-- Net liquidation comes within $400 of the trailing MLL floor
-
-Refuse to open a new position when:
-- Fewer than 10 minutes remain before the hard flatten
-- A position is already open
-- State is unreconciled after a reconnect
-- The kill switch file exists
-
-Also required: a one-action kill switch that flattens everything and stops.
-
-## Strategy v0.1 spec — opening range breakout, MNQ
-
-- Opening range = 09:30–09:45 ET high and low
-- Entry on a 5-minute **close** beyond the range, one trade per direction per day
-- Stop = range midpoint or 1×ATR(14) on 5m, whichever is tighter, capped at $80 risk
-- Target = 1.5R
-- Max 2 trades per session, no new entries after 11:30 ET
-- Minimum hold time is naturally minutes, which keeps well clear of any
-  microscalping concern
-
-This is a **hypothesis, not a validated edge.** Judge backtests on drawdown, not
-profit: reject any parameter set with max drawdown over $1,200, 5+ consecutive
-losing days, or fewer than 200 trades of evidence. Tune at most two parameters —
-more than that is curve-fitting.
-
-## SDK notes
-
-`project-x-py` v4.x is **async throughout**; the synchronous API was removed.
-
-```python
-from project_x_py import ProjectX, TradingSuite
-
-async with ProjectX.from_env() as client:
-    await client.authenticate()
-    acct = client.get_account_info()
-    bars = await client.get_bars("MNQ", days=5, interval=5)
-
-suite = await TradingSuite.create("MNQ")
-await suite.orders.place_bracket_order(
-    contract_id=suite.instrument_id, side=0, size=2,
-    entry_price=..., stop_loss_price=..., take_profit_price=...,
-)
-positions = await suite.positions.get_all_positions()
+```
+Historical / live data
+        ↓
+Normalisation + validation      timestamp convention must be DECLARED
+        ↓
+Backtester                      no lookahead, costs, adverse slippage
+        ↓
+Strategy (ORB v0.1)             pure; proposes only; knows no broker
+        ↓
+Risk Governor                   FINAL AUTHORITY; nothing overrides it
+        ↓
+Execution Intent                prices, validated, stop mandatory
+        ↓
+ExecutionBroker interface       requires a capability that cannot be obtained
+        ↓
+ProjectX adapter                READ-ONLY — no order method exists
 ```
 
-Env vars are `PROJECT_X_API_KEY`, `PROJECT_X_USERNAME`, optional
-`PROJECT_X_ACCOUNT_NAME`.
+---
 
-Rate limits: 200 requests / 60s general, 50 requests / 30s on `retrieveBars`.
-Nowhere near binding for this strategy — but back off on HTTP 429 rather than retrying hot.
+## Architecture
 
-There is **no sandbox**. API orders hit the live account path. The Combine account
-is simulated, so it is the test environment.
+| Module | Role |
+|---|---|
+| `config.py` | One typed config object, validated at startup, fails closed |
+| `governor.py` | **Final authority.** Pure: no I/O, no SDK, no clock |
+| `compliance.py` | Combine 55% and payout 40% consistency — the rules you break by *winning* |
+| `mll_tracker.py` | Reconstructs the trailing MLL floor; the API does not expose it |
+| `market_calendar.py` | Holiday dates; we stand aside on all of them |
+| `contracts.py` | Quarterly roll, front month, expiry |
+| `backtest.py` | Replay engine with the **real governor in the path** |
+| `performance.py` | Full metric suite; unavailable stats say so rather than inventing |
+| `research.py` | Walk-forward, splits, Monte Carlo, sensitivity |
+| `data.py` / `marketdata.py` | Load, validate, normalise; never guesses a convention |
+| `execution/` | Broker-neutral models, order state machine, capability boundary |
+| `brokers/projectx.py` | The only module that speaks ProjectX |
+| `reconciliation.py` | Broker truth wins; discrepancies fail closed |
+| `strategies/orb.py` | ORB v0.1 — **a hypothesis** |
 
-## Build order — do not reorder
+---
 
-1. `src/connection_test.py` — must print real balance and real bars. **Gate.**
-2. Risk governor + its tests. Deliberately try to break it.
-3. Strategy v0.1.
-4. Watchdog: heartbeat, push alerts, one-line-per-decision logging.
-5. Windows Task Scheduler registration, restart-on-failure, reboot test.
-6. `DRY_RUN=true` overnight rehearsal on Globex before ever transmitting.
+## Install
 
-## Failure modes seen in this domain — design against these
+```bash
+py -V:3.13 -m venv .venv          # Python 3.13; the SDK requires 3.12+
+.venv/Scripts/python -m pip install -r requirements.txt pytest
+cp .env.example .env              # placeholders are detected as "no credentials"
+```
 
-- Naked position after the process or network dies → broker-side brackets
-- Double entry after a reconnect → reconcile before deciding
-- Timezone or session-boundary bug trading at 03:00 → explicit ET handling, tested
-- A Windows update reboot mid-position → host hardening already applied
-- Gaming on the host starving the process → don't; Game Mode is disabled
-- Silent throttling from an overclock unstable over 23h uptime → OC disabled
+## Run
+
+```bash
+python -m pytest                              # 434 tests, all offline
+python -m src.cli config                      # effective config, secrets redacted
+python -m src.cli connection-test             # read-only API diagnostic
+python -m src.cli data --probe MNQ            # how deep is the history?
+python -m src.cli backtest --csv bars.csv --convention CLOSE --tz UTC
+python -m src.cli monte-carlo --csv bars.csv --convention CLOSE --tz UTC
+python -m src.cli mll --seed --mll 48000
+python -m src.cli compliance
+```
+
+No test requires credentials. No command can transmit an order.
+
+## Configure ProjectX
+
+Order matters — a key generated before linking authenticates but resolves to no
+tradable account:
+
+1. Buy the Combine 50K with **Responsible Trading Advantage ON** (free; it
+   *doubles* both payout caps)
+2. Create the ProjectX account → subscribe to API Access
+3. **Link it to TopstepX**
+4. *Then* generate the key in TopstepX → Settings
+5. Put it in `.env`. `PROJECT_X_USERNAME` is the **username**, not the email.
+
+---
+
+## Current status
+
+**Engine validated. Nothing else.**
+
+Cleared:
+- Risk governor, MLL tracker, calendar, contracts, compliance — all tested
+- Backtester proved against a hand-computed fixture, to the cent
+- Read-only ProjectX adapter, reconciliation, order state machine
+- 434 tests, 65 mutations caught
+
+Not cleared:
+- **Stage 0** — no API key yet
+- **Stage 1** — connection test has never run
+- **Stage 2** — history depth unknown; we may need vendor data
+- **Stage 4** — ORB has never seen real data
+- **Stage 5** — no dry-run runtime yet
+
+---
+
+## What is disabled, and what has not been verified
+
+**Disabled by construction:**
+- Order transmission — `grant_execution()` always raises; the adapter has no order method
+- `LIVE_TRADING_ENABLED=true` — rejected by config validation
+
+**Unverified, each with a fail-closed guard:**
+
+| Unknown | Guard |
+|---|---|
+| Bar timestamps: open- or close-labelled? | `BarSeries` refuses `UNKNOWN`; loaders require it explicitly |
+| Bar timezone: exchange-local or UTC? | Naive timestamps rejected without a declared zone |
+| ProjectX history depth | Unknown until `--probe` runs |
+| CME holiday dates | Cross-checked 2026 only; 2027 out of coverage and fails closed |
+| Bracket account mode | **Default mode rejects submitted brackets** — see `docs/PROJECTX_API.md` §4.1 |
+| `AccountUpdatePayload.equity` | Not read; net liq is derived |
+
+---
+
+## Documentation
+
+| File | Contents |
+|---|---|
+| `FIRM_RULES.md` | **Authoritative on every number.** Tagged VERIFIED / DERIVED / UNVERIFIED |
+| `DECISIONS.md` | Settled choices and what was rejected, with reasons |
+| `ROADMAP.md` | Staged plan and gates |
+| `CLAUDE.md` | Architecture and the caller contract |
+| `docs/PROJECTX_API.md` | Verified API behaviour and failure modes |
+
+---
+
+## A note on what this repository does not claim
+
+ORB v0.1 has produced no trades and has no measured edge. The acceptance gates
+in ROADMAP Stage 4 exist to reject it, and most candidate strategies do not
+clear such gates — that is the normal outcome, not a failure.
+
+Nothing here is ready for live trading, and this README will not say otherwise
+until every gate has actually been demonstrated.
